@@ -1,0 +1,6 @@
+.direnv
+.venv
+data
+.env
+chroma
+.ipynb_checkpoints
