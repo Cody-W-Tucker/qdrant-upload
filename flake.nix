@@ -23,6 +23,7 @@
               langchain-openai
               langchain-community
               langchain-text-splitters
+              pydantic
             ]);
           shellHook = ''
             # Default JOURNAL_PATH
