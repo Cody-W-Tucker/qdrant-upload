@@ -10,28 +10,37 @@ from langchain_community.document_loaders import ObsidianLoader
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_openai.embeddings import OpenAIEmbeddings
 
-# Initialize embeddings and text splitter
-text_splitter = SemanticChunker(OpenAIEmbeddings(model="text-embedding-3-small"))
+# At a high level, this splits into sentences, then groups into groups of 3 sentences, and then merges one that are similar in the embedding space.
+# TODO: Consider using recursive splitter, with current regex splitter and a min_chunk_size of 512.
+text_splitter = SemanticChunker(
+    OpenAIEmbeddings(model="text-embedding-3-large"), 
+    min_chunk_size=512, 
+    sentence_split_regex = (
+    r'(?<=[.?!])\s+(?![^[]*\])|'  # Sentence endings not in brackets (for obsidian [[links]])
+    r'(?<=\n#)\s|(?<=\n##)\s|(?<=\n###)\s|(?<=\n####)\s|(?<=\n#####)\s|(?<=\n######)\s|'  # Headers
+    r'(?<=\n-)\s|'  # Unordered lists
+    r'(?<=\n\d\.)\s|'  # Ordered lists
+    r'(?<=``````)\n' # Code blocks
+    )
+)
 
 # Function to combine multiple collection directories
-def collect_documents(collection_paths):
+def collect_documents(data_folder):
     documents = []
-    for name, path in collection_paths.items():
-        loader = ObsidianLoader(path)
-        docs = loader.load()  # Load documents
-        split_docs = text_splitter.split_documents(docs)  # Split documents using the text_splitter
-        documents.extend(split_docs)  # Add these documents to the list
+    for root, dirs, files in os.walk(data_folder):
+        for dir_name in dirs:
+            path = os.path.join(root, dir_name)
+            loader = ObsidianLoader(path)
+            docs = loader.load()  # Load documents
+            split_docs = text_splitter.split_documents(docs)  # Split documents using the text_splitter
+            documents.extend(split_docs)  # Add these documents to the list
     return documents
 
-# Define your collection paths
-collection_paths = {
-    "goals": "./data/Personal/Goals",
-    "knowledge": "./data/Personal/Knowledge",
-    "journal": "./data/Personal/Journal"
-}
+# Define your data folder
+data_folder = "./data"
 
-# Load and split the documents
-docs = collect_documents(collection_paths)
+# Collect documents from the data folder
+docs = collect_documents(data_folder)
 
 # Calculate the number of words total for all documents
 total_words = sum(len(doc.page_content.split()) for doc in docs)
