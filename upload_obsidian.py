@@ -24,7 +24,7 @@ text_splitter = SemanticChunker(
     )
 )
 
-# Function to combine multiple collection directories
+# Function to load, split, and return documents
 def collect_documents(data_folder):
     documents = []
     for root, dirs, files in os.walk(data_folder):
@@ -37,7 +37,7 @@ def collect_documents(data_folder):
     return documents
 
 # Define your data folder
-data_folder = "./data"
+data_folder = "./data/obsidian"
 
 # Collect documents from the data folder
 docs = collect_documents(data_folder)

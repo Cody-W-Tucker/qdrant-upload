@@ -24,23 +24,26 @@
               langchain-community
               langchain-text-splitters
               pydantic
+              pandas
+              jupyter
+              notebook
             ]);
           shellHook = ''
-            # Default JOURNAL_PATH
-            if [ -z "$JOURNAL_PATH" ]; then
-              export JOURNAL_PATH="$HOME/Documents/Personal"
+            # Default OBSIDIAN_PATH
+            if [ -z "$OBSIDIAN_PATH" ]; then
+              export OBSIDIAN_PATH="$HOME/Documents/Personal"
             fi
 
             # Create data directory if it doesn't exist
-            mkdir -p "$PWD/data"
+            mkdir -p "$PWD/data/obsidian"
 
             # Define directories to link
             DIRS_TO_LINK=("Knowledge" "Goals" "Journal")
 
             # Create symlinks for specific directories
             for dir in "''${DIRS_TO_LINK[@]}"; do
-              SOURCE_PATH="$JOURNAL_PATH/$dir"
-              SYMLINK_PATH="$PWD/data/$dir"
+              SOURCE_PATH="$OBSIDIAN_PATH/$dir"
+              SYMLINK_PATH="$PWD/data/obsidian/$dir"
     
               if [ -d "$SOURCE_PATH" ]; then
                 ln -sfn "$SOURCE_PATH" "$SYMLINK_PATH" \
