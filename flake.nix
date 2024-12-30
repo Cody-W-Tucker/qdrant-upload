@@ -27,6 +27,9 @@
               pandas
               jupyter
               notebook
+              scikit-learn
+              matplotlib
+              umap-learn
             ]);
           shellHook = ''
             # Default OBSIDIAN_PATH
