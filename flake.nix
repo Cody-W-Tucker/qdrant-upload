@@ -30,6 +30,8 @@
               scikit-learn
               matplotlib
               umap-learn
+              langgraph
+              nltk
             ]);
           shellHook = ''
             # Default OBSIDIAN_PATH
