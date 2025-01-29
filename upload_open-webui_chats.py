@@ -1,5 +1,4 @@
 from langchain_community.document_loaders import JSONLoader
-from typing import List, Dict
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_openai.embeddings import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore

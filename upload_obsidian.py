@@ -9,6 +9,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 from langchain_community.document_loaders import ObsidianLoader
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_openai.embeddings import OpenAIEmbeddings
+from langchain_qdrant import QdrantVectorStore
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Distance, VectorParams
 
 # At a high level, this splits into sentences, then groups into groups of 3 sentences, and then merges one that are similar in the embedding space.
 # TODO: Consider using recursive splitter, with current regex splitter and a min_chunk_size of 512.
@@ -51,10 +54,6 @@ print(f"{len(docs)} documents loaded with a total of {total_words:,} words.")
 
 # Embed the docs and add them to Qdrant vector-store
 embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
-from langchain_qdrant import QdrantVectorStore
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, VectorParams
-
 client = QdrantClient(path="/tmp/obsidian_docs")
 
 client.create_collection(

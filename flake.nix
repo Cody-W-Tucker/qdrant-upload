@@ -23,15 +23,6 @@
               langchain-openai
               langchain-community
               langchain-text-splitters
-              pydantic
-              pandas
-              jupyter
-              notebook
-              scikit-learn
-              matplotlib
-              umap-learn
-              langgraph
-              nltk
             ]);
           shellHook = ''
             # Default OBSIDIAN_PATH
@@ -43,7 +34,7 @@
             mkdir -p "$PWD/data/obsidian"
 
             # Define directories to link
-            DIRS_TO_LINK=("Knowledge" "Goals" "Journal")
+            DIRS_TO_LINK=("Journal")
 
             # Create symlinks for specific directories
             for dir in "''${DIRS_TO_LINK[@]}"; do
