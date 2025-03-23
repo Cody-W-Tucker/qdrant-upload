@@ -46,7 +46,7 @@ def collect_documents(data_folder):
             # Use DirectoryLoader on the symlinked folder
             loader = DirectoryLoader(
                 symlink_path,
-                glob="**/*.md",  # Load Markdown and plain text files
+                glob="**/*",  # Load all files
                 recursive=True,        # Recursively search within each symlinked folder
                 show_progress=True,
                 silent_errors=True     # Skip files that fail to load
