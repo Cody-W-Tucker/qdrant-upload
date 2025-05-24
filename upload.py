@@ -10,6 +10,7 @@ from langchain_openai.embeddings import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, Filter, FieldCondition, MatchValue
+from qdrant_client.http.exceptions import UnexpectedResponse
 from datetime import datetime
 import time
 
@@ -209,11 +210,11 @@ def collect_obsidian_documents(directories, custom_source=None):
             
     return documents
 
-# Function to load chat documents
-def collect_chat_documents(json_file):
+# Function to load chat documents (modified for streaming)
+def collect_chat_documents(json_file, batch_size_for_chunking=100):
     if not os.path.exists(json_file):
         print(f"Warning: JSON file '{json_file}' does not exist. No documents will be loaded.")
-        return []
+        return iter([]) # Return an empty iterator
     
     try:
         loader = JSONLoader(
@@ -226,13 +227,60 @@ def collect_chat_documents(json_file):
             metadata_func=extract_chat_metadata
         )
         
-        docs = loader.load()
-        split_docs = text_splitter.split_documents(docs)
-        print(f"Loaded {len(split_docs)} documents from {json_file}")
-        return split_docs
+        doc_iterator = loader.lazy_load() # Use lazy_load for an iterator
+        
+        batch_for_chunking = []
+        raw_docs_processed_count = 0
+
+        print(f"Starting to stream and process documents from {json_file}...")
+
+        for doc in doc_iterator:
+            batch_for_chunking.append(doc)
+            if len(batch_for_chunking) >= batch_size_for_chunking:
+                current_raw_batch_size = len(batch_for_chunking)
+                print(f"Collected {current_raw_batch_size} raw messages. Preparing to chunk...")
+                
+                start_chunk_time = time.time()
+                split_docs = text_splitter.split_documents(batch_for_chunking)
+                end_chunk_time = time.time()
+                print(f"Finished chunking {current_raw_batch_size} raw messages in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
+                
+                start_filter_time = time.time()
+                filtered_split_docs = filter_documents(split_docs)
+                end_filter_time = time.time()
+                num_yielded = len(filtered_split_docs) if filtered_split_docs else 0
+                print(f"Finished filtering in {end_filter_time - start_filter_time:.2f} seconds. Yielding {num_yielded} chunks.")
+
+                if filtered_split_docs:
+                    yield filtered_split_docs
+                raw_docs_processed_count += current_raw_batch_size
+                batch_for_chunking = [] # Reset batch
+
+        # Process any remaining documents in the last batch
+        if batch_for_chunking:
+            current_raw_batch_size = len(batch_for_chunking)
+            print(f"Collected final batch of {current_raw_batch_size} raw messages. Preparing to chunk...")
+            
+            start_chunk_time = time.time()
+            split_docs = text_splitter.split_documents(batch_for_chunking)
+            end_chunk_time = time.time()
+            print(f"Finished chunking final {current_raw_batch_size} raw messages in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
+            
+            start_filter_time = time.time()
+            filtered_split_docs = filter_documents(split_docs)
+            end_filter_time = time.time()
+            num_yielded = len(filtered_split_docs) if filtered_split_docs else 0
+            print(f"Finished filtering final batch in {end_filter_time - start_filter_time:.2f} seconds. Yielding {num_yielded} chunks.")
+
+            if filtered_split_docs:
+                yield filtered_split_docs
+            raw_docs_processed_count += current_raw_batch_size
+
+        print(f"Finished streaming and processing. Total raw chat messages processed from {json_file}: {raw_docs_processed_count}")
+
     except Exception as e:
-        print(f"Error loading documents from {json_file}: {e}")
-        return []
+        print(f"Error during streaming chat documents from {json_file}: {e}")
+        return iter([]) # Ensure it still returns an iterable in case of error
 
 # Function to filter out empty or very short documents
 def filter_documents(docs, min_content_length=MIN_CONTENT_LENGTH):
@@ -250,6 +298,58 @@ def filter_documents(docs, min_content_length=MIN_CONTENT_LENGTH):
     
     return filtered_docs
 
+# Initialize embeddings
+embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)
+
+# Set up Qdrant client and collection
+print(f"Connecting to Qdrant at {QDRANT_URL}...")
+client = QdrantClient(url=QDRANT_URL, prefer_grpc=False)
+
+# Check Qdrant connection and server status
+try:
+    # Try a basic operation like listing collections to verify connection
+    client.get_collections() # This will raise an exception if the server is not reachable
+    print(f"Successfully connected to Qdrant server at {QDRANT_URL} and was able to list collections.")
+except Exception as conn_e:
+    print(f"Error: Could not connect to or communicate effectively with Qdrant server at {QDRANT_URL}.")
+    print(f"Details: {conn_e}")
+    print("Please ensure the Qdrant server is running, accessible, and properly configured.")
+    exit(1)
+
+collection_name = args.collection
+try:
+    print(f"Checking for existing collection: '{collection_name}'...")
+    client.get_collection(collection_name)
+    print(f"Collection '{collection_name}' already exists. Adding documents to it.")
+except UnexpectedResponse as e:
+    if e.status_code == 404: # Not found
+        print(f"Collection '{collection_name}' not found. Creating new collection.")
+        try:
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=VECTOR_DIMENSIONS, distance=DISTANCE_MAP[DISTANCE_METRIC]),
+            )
+            print(f"Successfully created collection '{collection_name}'.")
+        except Exception as create_error:
+            print(f"Error: Could not create collection '{collection_name}'.")
+            print(f"Details: {create_error}")
+            exit(1)
+    else:
+        print(f"Error: An unexpected issue occurred while checking for collection '{collection_name}'.")
+        print(f"Details: {e}")
+        exit(1)
+except Exception as e: # Catch other potential errors like network issues during get_collection
+    print(f"Error: Could not verify collection '{collection_name}' due to an unexpected error.")
+    print(f"Details: {e}")
+    exit(1)
+
+# Initialize vector store
+vector_store = QdrantVectorStore(
+    client=client,
+    collection_name=collection_name,
+    embedding=embeddings,
+)
+
 # Validate required arguments
 directories_to_process = args.dirs or []
 if args.type in ['general', 'obsidian'] and not directories_to_process:
@@ -263,72 +363,34 @@ if args.type == 'chat' and not args.json_file:
 # Load documents based on the specified type
 if args.type == 'general':
     docs = collect_general_documents(directories_to_process, args.source)
+    docs = filter_documents(docs) # Filter empty/short documents
+
+    if not docs:
+        print("No general documents to upload after filtering. Exiting.")
+        exit(0)
+
+    total_words = sum(len(doc.page_content.split()) for doc in docs)
+    print(f"{len(docs)} general documents loaded with a total of {total_words:,} words.")
+    
+    print(f"Uploading {len(docs)} general documents to collection '{args.collection}'...")
+    for i in range(0, len(docs), BATCH_SIZE):
+        batch_docs = docs[i:i+BATCH_SIZE]
+        vector_store.add_documents(batch_docs)
+        print(f"Uploaded batch {i//BATCH_SIZE + 1}/{(len(docs)-1)//BATCH_SIZE + 1} ({len(batch_docs)} documents)")
+    
+    print(f"Successfully processed {len(docs)} general documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
+
 elif args.type == 'obsidian':
-    docs = collect_obsidian_documents(directories_to_process, args.source)
-elif args.type == 'chat':
-    docs = collect_chat_documents(args.json_file)
-else:
-    print(f"Error: Unknown document type: {args.type}")
-    exit(1)
-
-# Filter out empty documents
-docs = filter_documents(docs)
-
-# Calculate total words and print stats
-total_words = sum(len(doc.page_content.split()) for doc in docs)
-print(f"{len(docs)} documents loaded with a total of {total_words:,} words.")
-
-# Exit early if no documents were loaded
-if not docs:
-    print("No documents to upload. Exiting.")
-    exit(1)
-
-# Initialize embeddings
-embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)
-
-# Set up Qdrant client and collection
-client = QdrantClient(url=QDRANT_URL, prefer_grpc=False)
-
-# Create collection if it doesn't exist
-collection_name = args.collection
-try:
-    client.get_collection(collection_name)
-    print(f"Collection '{collection_name}' already exists. Adding documents to it.")
-except Exception as e:
-    if "Connection refused" in str(e):
-        print(f"Error: Could not connect to Qdrant server at {QDRANT_URL}")
-        print("Make sure the Qdrant server is running and accessible.")
-        exit(1)
+    print(f"Processing Obsidian documents with update checks from: {directories_to_process}")
     
-    print(f"Creating new collection '{collection_name}'.")
-    try:
-        client.create_collection(
-            collection_name=collection_name,
-            vectors_config=VectorParams(size=VECTOR_DIMENSIONS, distance=DISTANCE_MAP[DISTANCE_METRIC]),
-        )
-    except Exception as create_error:
-        if "Connection refused" in str(create_error):
-            print(f"Error: Could not connect to Qdrant server at {QDRANT_URL}")
-            print("Make sure the Qdrant server is running and accessible.")
-            exit(1)
-        else:
-            raise
-
-# Initialize vector store
-vector_store = QdrantVectorStore(
-    client=client,
-    collection_name=collection_name,
-    embedding=embeddings,
-)
-
-# Process documents based on their existence and modification time
-if args.type == 'obsidian':
-    print("Processing Obsidian documents with update checks...")
-    
-    # Load documents without chunking first
     raw_docs = collect_obsidian_documents(directories_to_process, args.source)
-    
-    # Group documents by source to handle all chunks of the same document together
+    # Note: Filtering for Obsidian docs is handled implicitly by checking content for updates/existence.
+    # If needed, filter_documents can be applied to raw_docs before the docs_by_source grouping.
+
+    if not raw_docs:
+        print("No Obsidian documents found to process. Exiting.")
+        exit(0)
+
     docs_by_source = {}
     for doc in raw_docs:
         source = doc.metadata.get('source')
@@ -336,23 +398,29 @@ if args.type == 'obsidian':
             docs_by_source[source] = []
         docs_by_source[source].append(doc)
     
-    # Stats
-    total_processed = 0
-    total_skipped = 0
-    total_updated = 0
-    total_added = 0
+    total_processed_sources = 0
+    total_skipped_sources = 0
+    total_updated_sources = 0
+    total_added_sources = 0
+    total_chunks_uploaded = 0
     
-    # Collect documents that need processing
-    docs_to_chunk = []
+    docs_to_chunk_and_upload = []
     
-    # Process each source document
     for source, source_docs in docs_by_source.items():
         needs_processing = True
+        existing_doc_found = False
         
+        # Pre-filter the source_docs to remove very short content before expensive DB checks
+        # We do this on a per-source basis to keep the logic contained.
+        filtered_source_docs = filter_documents(source_docs)
+        if not filtered_source_docs:
+            print(f"Skipping source '{source}' as all its content is too short after filtering.")
+            total_skipped_sources +=1
+            continue
+
         if args.skip_existing:
-            # Check if documents with this source already exist
             search_results = client.scroll(
-                collection_name=collection_name,
+                collection_name=args.collection,
                 scroll_filter=Filter(
                     must=[
                         FieldCondition(
@@ -362,19 +430,18 @@ if args.type == 'obsidian':
                     ]
                 ),
                 limit=1,
-                with_payload=True,
+                with_payload=False, # No need for payload here, just existence check
                 with_vectors=False
             )
             
-            if search_results[0]:  # If any documents found
-                print(f"Skipping existing document: {source}")
-                total_skipped += len(source_docs)
+            if search_results[0]:
+                print(f"Skipping existing document source: {source}")
+                total_skipped_sources += 1
                 needs_processing = False
         
         elif not args.force_update:
-            # Check if documents need updates based on modification time
             search_results = client.scroll(
-                collection_name=collection_name,
+                collection_name=args.collection,
                 scroll_filter=Filter(
                     must=[
                         FieldCondition(
@@ -384,30 +451,25 @@ if args.type == 'obsidian':
                     ]
                 ),
                 limit=1,
-                with_payload=True,
+                with_payload=True, # Need payload for last_modified
                 with_vectors=False
             )
             
-            if search_results[0]:  # If any documents found
-                # Get last_modified from the local document
-                local_last_modified = source_docs[0].metadata.get('last_modified', 0)
-                
-                # Get last_modified from the stored document
+            if search_results[0]:
+                existing_doc_found = True
+                local_last_modified = filtered_source_docs[0].metadata.get('last_modified', 0)
                 stored_meta = search_results[0][0].payload.get('metadata', {})
                 stored_last_modified = stored_meta.get('last_modified', 0)
                 
                 if local_last_modified <= stored_last_modified:
-                    print(f"Skipping unchanged document: {source}")
-                    total_skipped += len(source_docs)
+                    print(f"Skipping unchanged document source: {source}")
+                    total_skipped_sources += 1
                     needs_processing = False
         
         if needs_processing:
-            # If we need to process this document, add it to our chunking list
-            docs_to_chunk.extend(source_docs)
-            
-            # First, delete any existing versions
+            # Delete existing points for this source before adding new/updated ones
             client.delete(
-                collection_name=collection_name,
+                collection_name=args.collection,
                 points_selector=Filter(
                     must=[
                         FieldCondition(
@@ -418,43 +480,86 @@ if args.type == 'obsidian':
                 )
             )
             
-            # Update stats
-            if search_results[0] if 'search_results' in locals() else False:
-                print(f"Updated document: {source}")
-                total_updated += len(source_docs)
-            else:
-                print(f"Added new document: {source}")
-                total_added += len(source_docs)
+            docs_to_chunk_and_upload.extend(filtered_source_docs)
             
-            total_processed += len(source_docs)
+            if existing_doc_found:
+                print(f"Marked document source for update: {source}")
+                total_updated_sources += 1
+            else:
+                print(f"Marked new document source for adding: {source}")
+                total_added_sources += 1
+            total_processed_sources +=1
     
-    # Only chunk and embed documents that need processing
-    if docs_to_chunk:
-        print(f"Chunking and embedding {len(docs_to_chunk)} documents...")
-        split_docs = text_splitter.split_documents(docs_to_chunk)
+    if docs_to_chunk_and_upload:
+        print(f"Chunking and embedding {len(docs_to_chunk_and_upload)} documents from {total_processed_sources} sources...")
+        # ObsidianLoader already produces fairly well-defined documents; splitting further might be too granular.
+        # However, SemanticChunker can help if individual obsidian notes are very long.
+        # For now, we assume ObsidianLoader's output is fine for direct add, or that SemanticChunker is applied in collect_obsidian_documents if desired.
+        # If SemanticChunker needs to be applied here, it would be:
+        # split_docs_for_upload = text_splitter.split_documents(docs_to_chunk_and_upload)
+        # For now, let's assume docs_to_chunk_and_upload are already appropriately chunked or don't need further semantic splitting.
         
-        # Now add the processed documents
-        vector_store.add_documents(split_docs)
-    else:
-        split_docs = []
-    
-    # Print final stats
-    print(f"\nObsidian document processing complete:")
-    print(f"  - New documents added: {total_added}")
-    print(f"  - Existing documents updated: {total_updated}")
-    print(f"  - Documents skipped (unchanged): {total_skipped}")
-    print(f"  - Total chunks processed: {len(split_docs)}")
-    
-else:
-    # For non-Obsidian documents, just add them directly
-    print(f"Uploading {len(docs)} documents to collection '{collection_name}'...")
-    
-    # Use batch uploading for efficiency
-    for i in range(0, len(docs), BATCH_SIZE):
-        batch_docs = docs[i:i+BATCH_SIZE]
-        vector_store.add_documents(batch_docs)
-        print(f"Uploaded batch {i//BATCH_SIZE + 1}/{(len(docs)-1)//BATCH_SIZE + 1} ({len(batch_docs)} documents)")
+        # The original script splits obsidian docs in collect_obsidian_documents. Let's ensure that happens or adjust.
+        # Rereading the original: collect_obsidian_documents DOES NOT split. It loads, adds metadata.
+        # The split happens later in the original script IF type is obsidian, after grouping.
+        # This was an oversight in my previous analysis. Let's apply splitting here.
+        
+        split_docs_for_upload = text_splitter.split_documents(docs_to_chunk_and_upload)
+        total_chunks_uploaded = len(split_docs_for_upload)
 
-print(f"Successfully processed {len(docs)} documents to Qdrant collection '{collection_name}' at {QDRANT_URL}.")
+        print(f"Uploading {total_chunks_uploaded} chunks from {total_processed_sources} sources...")
+        for i in range(0, len(split_docs_for_upload), BATCH_SIZE):
+            batch_docs = split_docs_for_upload[i:i+BATCH_SIZE]
+            vector_store.add_documents(batch_docs)
+            print(f"Uploaded batch {i//BATCH_SIZE + 1}/{(len(split_docs_for_upload)-1)//BATCH_SIZE + 1} ({len(batch_docs)} chunks)")
+    else:
+        print("No Obsidian documents required chunking or uploading.")
+    
+    print(f"\nObsidian document processing complete:")
+    print(f"  - New document sources added: {total_added_sources}")
+    print(f"  - Existing document sources updated: {total_updated_sources}")
+    print(f"  - Document sources skipped (unchanged or already exists): {total_skipped_sources}")
+    print(f"  - Total chunks uploaded: {total_chunks_uploaded}")
+    print(f"Successfully processed Obsidian documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
+
+elif args.type == 'chat':
+    print(f"Processing chat documents from: {args.json_file} (streaming)")
+    # collect_chat_documents is now a generator yielding batches of *already filtered and split* docs
+    doc_batch_generator = collect_chat_documents(args.json_file, batch_size_for_chunking=100) # Internal batch size for chunking
+    
+    total_chunks_uploaded_chat = 0
+    batch_num = 0
+    any_docs_processed = False
+
+    for doc_batch in doc_batch_generator: # doc_batch is a list of filtered, split documents
+        if not doc_batch: # Should not happen if filter_documents works correctly with yield
+            continue
+
+        any_docs_processed = True
+        batch_num += 1
+        num_docs_in_batch = len(doc_batch)
+        total_chunks_uploaded_chat += num_docs_in_batch
+        
+        print(f"Uploading chat document batch {batch_num} with {num_docs_in_batch} chunks to collection '{args.collection}'...")
+        # Qdrant's add_documents can handle a list of documents directly for batching.
+        # The BATCH_SIZE constant is for Qdrant client library internal batching, not what we do here.
+        # However, the vector_store.add_documents method uses its own batching if the list is large.
+        # We are essentially feeding it pre-batched chunks from our generator.
+        vector_store.add_documents(doc_batch) # This will further batch if doc_batch is > BATCH_SIZE
+        print(f"Uploaded chat batch {batch_num} ({num_docs_in_batch} chunks).")
+
+    if not any_docs_processed:
+        print("No chat documents were processed or yielded from the generator. Exiting.")
+        exit(0)
+
+    print(f"\nChat document streaming and upload complete:")
+    print(f"  - Total chunks uploaded: {total_chunks_uploaded_chat}")
+    print(f"Successfully processed chat documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
+
+else:
+    print(f"Error: Unknown document type specified: {args.type}")
+    exit(1)
+
+# General success message parts, can be enhanced per type if needed
 if args.source:
-    print(f"All documents tagged with custom source: '{args.source}'") 
+    print(f"All documents processed were intended to be tagged with custom source: '{args.source}'") 

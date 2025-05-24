@@ -72,6 +72,7 @@
           langchain-openai
           langchain-text-splitters
           unstructured
+          jq
           # Our custom packages
           langchain-experimental
           langchain-qdrant
@@ -91,7 +92,7 @@
           pythonEnv = configUtils.mkPythonEnv options;
           dirs = builtins.concatStringsSep " " (map (dir: ''"${dir}"'') options.obsidianDirectories);
         in pkgs.mkShell {
-          packages = [ pythonEnv ];
+          packages = [ pythonEnv pkgs.jq ];
           shellHook = ''
             # Load .env file if it exists
             if [ -f .env ]; then
@@ -152,7 +153,7 @@
         in
         pkgs.writeShellApplication {
           name = "qdrant-upload";
-          runtimeInputs = [ pythonEnv ];
+          runtimeInputs = [ pythonEnv pkgs.jq ];
           text = ''
             # Load .env file if it exists
             if [ -f .env ]; then
