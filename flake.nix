@@ -253,7 +253,7 @@
         default = mkDevShell { 
           inherit pkgs; 
           config = { 
-            obsidianDirectories = [ "$HOME/Documents/Personal/Inbox" "$HOME/Documents/Personal/Journal" "$HOME/Documents/Personal/Knowledge" "$HOME/Documents/Personal/Projects" "$HOME/Documents/Personal/Research" ]; 
+            obsidianDirectories = [ "$HOME/Documents/Personal/Journal" "$HOME/Documents/Personal/Knowledge" ]; 
           };
         };
         custom = mkDevShell { inherit pkgs; config = {}; }; # No defaults, rely on QDRANT_FOLDERS
