@@ -1,17 +1,14 @@
 import os
-import sys
 import argparse
-import glob
 from dotenv import load_dotenv
 from langchain_community.document_loaders import DirectoryLoader, ObsidianLoader, JSONLoader
 from langchain_community.document_loaders import TextLoader
-from langchain_experimental.text_splitter import SemanticChunker
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from langchain_openai.embeddings import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, Filter, FieldCondition, MatchValue
 from qdrant_client.http.exceptions import UnexpectedResponse
-from datetime import datetime
 import time
 
 # Load environment variables from .env file
@@ -22,7 +19,7 @@ if not OPENAI_API_KEY:
 
 # Load configurables from environment variables with defaults
 QDRANT_URL = os.getenv("QDRANT_UPLOAD_URL", "http://qdrant.homehub.tv")
-DEFAULT_COLLECTION = os.getenv("QDRANT_UPLOAD_COLLECTION", "main")
+DEFAULT_COLLECTION = os.getenv("QDRANT_UPLOAD_COLLECTION", "personal")
 EMBEDDING_MODEL = os.getenv("QDRANT_UPLOAD_MODEL", "text-embedding-3-large")
 VECTOR_DIMENSIONS = int(os.getenv("QDRANT_UPLOAD_DIMENSIONS", "3072"))
 DISTANCE_METRIC = os.getenv("QDRANT_UPLOAD_DISTANCE", "Cosine")
@@ -64,16 +61,22 @@ if args.dirs is None and os.environ.get('QDRANT_FOLDERS'):
             print(f"  - {dir}")
         args.dirs = qdrant_folders
 
-# Initialize the text splitter
-text_splitter = SemanticChunker(
-    OpenAIEmbeddings(model=EMBEDDING_MODEL),
-    sentence_split_regex=(
-        r'(?<=[.?!])\s+(?![^[]*\])|'  # Sentence endings not in brackets (e.g., for Obsidian [[links]])
-        r'(?<=\n#)\s|(?<=\n##)\s|(?<=\n###)\s|(?<=\n####)\s|(?<=\n#####)\s|(?<=\n######)\s|'  # Headers
-        r'(?<=\n-)\s|'  # Unordered lists
-        r'(?<=\n\d\.)\s|'  # Ordered lists
-        r'(?<=``````)\n'  # Code blocks
-    )
+headers_to_split_on = [
+    ("#", "Header 1"),
+    ("##", "Header 2"),
+    ("###", "Header 3"),
+    ("####", "Header 4"),
+    ("#####", "Header 5"),
+    ("######", "Header 6"),
+]
+markdown_header_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on, strip_headers=True)
+
+CHUNK_SIZE = int(os.getenv("QDRANT_UPLOAD_CHUNK_SIZE", "1000"))
+CHUNK_OVERLAP = int(os.getenv("QDRANT_UPLOAD_CHUNK_OVERLAP", "100"))
+
+recursive_character_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=CHUNK_SIZE,
+    chunk_overlap=CHUNK_OVERLAP
 )
 
 # Function to extract metadata for chat documents
@@ -91,93 +94,132 @@ def extract_chat_metadata(record: dict, metadata: dict) -> dict:
 
 # Function to load general documents from multiple directories
 def collect_general_documents(directories, custom_source=None):
-    documents = []
+    all_final_split_documents = []
     
     # Process each directory individually
     for directory_path in directories:
         if not os.path.exists(directory_path):
             print(f"Warning: Directory '{directory_path}' does not exist. Skipping.")
             continue
-            
-        try:
-            # Find all markdown files in the directory
-            markdown_files = []
-            for root, _, files in os.walk(directory_path):
-                for file in files:
-                    if file.endswith('.md'):
-                        markdown_files.append(os.path.join(root, file))
-            
-            # Process markdown files with TextLoader
-            md_docs = []
-            for file_path in markdown_files:
-                try:
-                    loader = TextLoader(file_path)
-                    file_docs = loader.load()
-                    md_docs.extend(file_docs)
-                    print(f"Loaded Markdown file: {file_path}")
-                except Exception as e:
-                    print(f"Error loading Markdown file {file_path}: {e}")
-            
-            # Try to process other file types with DirectoryLoader if possible
-            other_docs = []
+        
+        # Load Markdown files
+        markdown_file_paths = []
+        for root, _, files in os.walk(directory_path):
+            for file in files:
+                if file.endswith('.md'):
+                    markdown_file_paths.append(os.path.join(root, file))
+        
+        for md_file_path in markdown_file_paths:
             try:
-                # Exclude markdown files (we already processed them)
-                loader = DirectoryLoader(
-                    directory_path,
-                    glob="**/*",
-                    exclude=["**/*.md"],
-                    recursive=True,
-                    show_progress=True,
-                    silent_errors=True
-                )
-                other_docs = loader.load()
-                print(f"Loaded {len(other_docs)} non-Markdown documents from {directory_path}")
+                loader = TextLoader(md_file_path)
+                loaded_file_doc_list = loader.load()
+                if not loaded_file_doc_list:
+                    continue
+                
+                original_doc = loaded_file_doc_list[0]
+                base_metadata = original_doc.metadata.copy() if original_doc.metadata else {}
+                base_metadata['original_file_path'] = md_file_path
+
+                if custom_source:
+                    base_metadata['source'] = custom_source
+                elif 'source' not in base_metadata : # TextLoader puts filename in 'source'
+                    base_metadata['source'] = os.path.basename(md_file_path)
+                
+                base_metadata['source_directory'] = directory_path
+                try:
+                    base_metadata['last_modified'] = os.path.getmtime(md_file_path)
+                except OSError:
+                    base_metadata['last_modified'] = time.time()
+
+                header_split_docs = markdown_header_splitter.split_text(original_doc.page_content)
+                
+                docs_for_recursive_split = []
+                for h_split_doc in header_split_docs:
+                    merged_metadata = base_metadata.copy()
+                    merged_metadata.update(h_split_doc.metadata) # h_split_doc.metadata has 'Header N'
+                    h_split_doc.metadata = merged_metadata
+                    docs_for_recursive_split.append(h_split_doc)
+
+                final_splits_for_file = recursive_character_splitter.split_documents(docs_for_recursive_split)
+                
+                for i, chunk in enumerate(final_splits_for_file):
+                    if not chunk.metadata: chunk.metadata = {}
+                    chunk.metadata['chunk_id'] = f"{base_metadata.get('source', 'unknown_md_file')}_md_part_{i}"
+                
+                all_final_split_documents.extend(final_splits_for_file)
+                print(f"Processed Markdown file: {md_file_path}, found {len(final_splits_for_file)} chunks.")
             except Exception as e:
-                print(f"Warning: Could not process non-Markdown files: {e}")
-                print("Continuing with Markdown files only.")
+                print(f"Error processing Markdown file {md_file_path}: {e}")
+
+        # Load other file types (non-Markdown)
+        try:
+            # Exclude markdown files as they are already processed
+            dir_loader = DirectoryLoader(
+                directory_path,
+                glob="**/*",
+                exclude=["**/*.md"], # Ensure we don't double process
+                recursive=True,
+                show_progress=True,
+                silent_errors=True
+            )
+            other_raw_docs = dir_loader.load()
+            
+            processed_other_docs_for_dir = []
+            if other_raw_docs:
+                docs_for_recursive_split_others = []
+                for doc in other_raw_docs:
+                    base_metadata = doc.metadata.copy() if doc.metadata else {}
+                    
+                    # DirectoryLoader 'source' is usually path relative to loaded dir or absolute.
+                    # Let's try to ensure original_file_path is absolute or clearly identifiable.
+                    file_path_from_meta = base_metadata.get('source', base_metadata.get('path'))
+                    if file_path_from_meta:
+                        if not os.path.isabs(file_path_from_meta):
+                           base_metadata['original_file_path'] = os.path.join(directory_path, file_path_from_meta)
+                        else:
+                           base_metadata['original_file_path'] = file_path_from_meta
+                    else:
+                        base_metadata['original_file_path'] = "unknown_path"
+
+
+                    if custom_source:
+                        base_metadata['source'] = custom_source
+                    elif 'source' not in base_metadata and file_path_from_meta:
+                         base_metadata['source'] = file_path_from_meta # Use path from loader if no custom source
+                    elif 'source' not in base_metadata:
+                        base_metadata['source'] = "unknown_source"
+
+
+                    base_metadata['source_directory'] = directory_path
+                    try:
+                        fpath_for_mtime = base_metadata['original_file_path']
+                        if os.path.exists(fpath_for_mtime) and os.path.isfile(fpath_for_mtime):
+                            base_metadata['last_modified'] = os.path.getmtime(fpath_for_mtime)
+                        else:
+                            base_metadata['last_modified'] = time.time() # Fallback
+                    except Exception:
+                        base_metadata['last_modified'] = time.time()
+                    
+                    doc.metadata = base_metadata # Update doc's metadata before splitting
+                    docs_for_recursive_split_others.append(doc)
+
+                final_splits_for_others = recursive_character_splitter.split_documents(docs_for_recursive_split_others)
                 
-            # Combine all documents
-            docs = md_docs + other_docs
-            
-            if not docs:
-                print(f"No documents could be loaded from '{directory_path}'.")
-                continue
+                for i, chunk in enumerate(final_splits_for_others):
+                    if not chunk.metadata: chunk.metadata = {}
+                    chunk.metadata['chunk_id'] = f"{chunk.metadata.get('source', 'unknown_other_file')}_other_part_{i}"
                 
-            # Add source directory information to metadata
-            for doc in docs:
-                if not doc.metadata:
-                    doc.metadata = {}
-                # Apply custom source if provided, otherwise use file path
-                if custom_source:
-                    doc.metadata['source'] = custom_source
-                elif 'source' not in doc.metadata:
-                    doc.metadata['source'] = doc.metadata.get('path', 'unknown')
-                # Add directory source information
-                doc.metadata['source_directory'] = directory_path
-                # Add current timestamp if not present
-                if 'last_modified' not in doc.metadata:
-                    doc.metadata['last_modified'] = time.time()
-            
-            split_docs = text_splitter.split_documents(docs)  # Split documents
-            
-            # Ensure chunk metadata has proper tracking
-            for i, chunk in enumerate(split_docs):
-                if not chunk.metadata:
-                    chunk.metadata = {}
-                # Preserve source information after splitting
-                if custom_source:
-                    chunk.metadata['source'] = custom_source
-                elif 'source' not in chunk.metadata:
-                    chunk.metadata['source'] = chunk.metadata.get('path', 'unknown')
-                # Add chunk number for better tracking
-                chunk.metadata['chunk_id'] = i
-            
-            documents.extend(split_docs)
-            print(f"Loaded {len(split_docs)} documents from {directory_path}")
+                all_final_split_documents.extend(final_splits_for_others)
+                print(f"Processed {len(final_splits_for_others)} non-Markdown chunks from {directory_path}")
         except Exception as e:
-            print(f"Error loading documents from {directory_path}: {e}")
+            print(f"Warning: Could not process non-Markdown files in {directory_path}: {e}")
             
-    return documents
+    if not all_final_split_documents:
+        print(f"No documents could be loaded or processed from any of the specified directories.")
+    else:
+        print(f"Collected a total of {len(all_final_split_documents)} chunks from general directories.")
+            
+    return all_final_split_documents
 
 # Function to load Obsidian documents from multiple directories
 def collect_obsidian_documents(directories, custom_source=None):
@@ -197,11 +239,23 @@ def collect_obsidian_documents(directories, custom_source=None):
             for doc in docs:
                 if not doc.metadata:
                     doc.metadata = {}
+                
+                # ObsidianLoader provides 'path' (absolute) and 'source' (filename.md)
+                # We prefer the absolute path for 'original_file_path' for consistency
+                doc.metadata['original_file_path'] = doc.metadata.get('path', 'unknown_obsidian_path')
+
                 if custom_source:
                     doc.metadata['source'] = custom_source
-                elif 'source' not in doc.metadata:
-                    doc.metadata['source'] = doc.metadata.get('path', 'unknown')
+                elif 'source' not in doc.metadata: # Should be set by ObsidianLoader
+                    doc.metadata['source'] = os.path.basename(doc.metadata.get('path', 'unknown.md'))
+                
                 doc.metadata['source_directory'] = directory_path
+                # last_modified should be provided by ObsidianLoader, if not, fallback
+                if 'last_modified' not in doc.metadata:
+                    try:
+                        doc.metadata['last_modified'] = os.path.getmtime(doc.metadata['original_file_path'])
+                    except Exception:
+                         doc.metadata['last_modified'] = time.time()
             
             documents.extend(docs)
             print(f"Loaded {len(docs)} documents from {directory_path}")
@@ -241,7 +295,7 @@ def collect_chat_documents(json_file, batch_size_for_chunking=100):
                 print(f"Collected {current_raw_batch_size} raw messages. Preparing to chunk...")
                 
                 start_chunk_time = time.time()
-                split_docs = text_splitter.split_documents(batch_for_chunking)
+                split_docs = recursive_character_splitter.split_documents(batch_for_chunking)
                 end_chunk_time = time.time()
                 print(f"Finished chunking {current_raw_batch_size} raw messages in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
                 
@@ -262,7 +316,7 @@ def collect_chat_documents(json_file, batch_size_for_chunking=100):
             print(f"Collected final batch of {current_raw_batch_size} raw messages. Preparing to chunk...")
             
             start_chunk_time = time.time()
-            split_docs = text_splitter.split_documents(batch_for_chunking)
+            split_docs = recursive_character_splitter.split_documents(batch_for_chunking)
             end_chunk_time = time.time()
             print(f"Finished chunking final {current_raw_batch_size} raw messages in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
             
@@ -397,6 +451,47 @@ elif args.type == 'obsidian':
         if source not in docs_by_source:
             docs_by_source[source] = []
         docs_by_source[source].append(doc)
+
+    # Cull remote obsidian sources that are no longer present locally
+    local_sources = set(docs_by_source.keys())
+    print(f"Culling remote obsidian sources not present locally. Local sources: {sorted(local_sources)}")
+    remote_sources = set()
+    offset = None
+    limit = BATCH_SIZE
+    while True:
+        records, offset = client.scroll(
+            collection_name=collection_name,
+            scroll_filter=None,
+            limit=limit,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for rec in records:
+            payload = getattr(rec, 'payload', None)
+            if payload is None and isinstance(rec, dict):
+                payload = rec.get('payload')
+            if not payload:
+                continue
+            metadata = payload.get('metadata', {}) or {}
+            src = metadata.get('source')
+            if src:
+                remote_sources.add(src)
+        if offset is None:
+            break
+    to_delete = remote_sources - local_sources
+    if to_delete:
+        for src in to_delete:
+            client.delete(
+                collection_name=collection_name,
+                points_selector=Filter(
+                    must=[FieldCondition(key="metadata.source", match=MatchValue(value=src))]
+                )
+            )
+            print(f"Deleted remote obsidian source no longer present: {src}")
+        print(f"Culled {len(to_delete)} remote source(s) from collection.")
+    else:
+        print("No remote obsidian sources to cull.")
     
     total_processed_sources = 0
     total_skipped_sources = 0
@@ -491,20 +586,31 @@ elif args.type == 'obsidian':
             total_processed_sources +=1
     
     if docs_to_chunk_and_upload:
-        print(f"Chunking and embedding {len(docs_to_chunk_and_upload)} documents from {total_processed_sources} sources...")
-        # ObsidianLoader already produces fairly well-defined documents; splitting further might be too granular.
-        # However, SemanticChunker can help if individual obsidian notes are very long.
-        # For now, we assume ObsidianLoader's output is fine for direct add, or that SemanticChunker is applied in collect_obsidian_documents if desired.
-        # If SemanticChunker needs to be applied here, it would be:
-        # split_docs_for_upload = text_splitter.split_documents(docs_to_chunk_and_upload)
-        # For now, let's assume docs_to_chunk_and_upload are already appropriately chunked or don't need further semantic splitting.
+        print(f"Applying header and recursive splitting to {len(docs_to_chunk_and_upload)} Obsidian documents from {total_processed_sources} sources...")
+        all_final_chunks_for_obsidian_upload = []
+        for doc_to_process in docs_to_chunk_and_upload: # These are full documents for sources that need update/add
+            original_metadata = doc_to_process.metadata.copy() # Already enriched by collect_obsidian_documents
+            page_content = doc_to_process.page_content
+
+            header_splits = markdown_header_splitter.split_text(page_content)
+            
+            current_file_chunks_for_recursive_split = []
+            for h_split in header_splits:
+                merged_meta = original_metadata.copy()
+                merged_meta.update(h_split.metadata) # Add Header 1, Header 2 etc.
+                h_split.metadata = merged_meta
+                current_file_chunks_for_recursive_split.append(h_split)
+                
+            final_chunks_for_file = recursive_character_splitter.split_documents(current_file_chunks_for_recursive_split)
+            
+            for i, chunk in enumerate(final_chunks_for_file):
+                if not chunk.metadata: chunk.metadata = {} # Should be populated
+                chunk.metadata['chunk_id'] = f"{chunk.metadata.get('source', 'unknown_obsidian_file')}_obs_part_{i}"
+
+            all_final_chunks_for_obsidian_upload.extend(final_chunks_for_file)
+        print(f"Finished splitting. Produced {len(all_final_chunks_for_obsidian_upload)} chunks for upload.")
         
-        # The original script splits obsidian docs in collect_obsidian_documents. Let's ensure that happens or adjust.
-        # Rereading the original: collect_obsidian_documents DOES NOT split. It loads, adds metadata.
-        # The split happens later in the original script IF type is obsidian, after grouping.
-        # This was an oversight in my previous analysis. Let's apply splitting here.
-        
-        split_docs_for_upload = text_splitter.split_documents(docs_to_chunk_and_upload)
+        split_docs_for_upload = all_final_chunks_for_obsidian_upload
         total_chunks_uploaded = len(split_docs_for_upload)
 
         print(f"Uploading {total_chunks_uploaded} chunks from {total_processed_sources} sources...")

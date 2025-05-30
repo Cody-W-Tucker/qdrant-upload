@@ -29,7 +29,7 @@ let
       sha256 = "QbhXPLsbRwb3bcdpJR2Oaz5BB+zV+pfFgUGXfsGfunU=";
     };
     nativeBuildInputs = [ python3.pkgs.poetry-core ];
-    propagatedBuildInputs = with python3.pkgs; [ 
+    propagatedBuildInputs = with python3.pkgs; [
       langchain
       qdrant-client
     ];
@@ -52,16 +52,17 @@ let
   # Define default options
   defaultOptions = {
     qdrantUrl = "http://localhost:6333";
-    defaultCollection = "main";
+    defaultCollection = "personal";
     embeddingModel = "text-embedding-3-large";
     vectorDimensions = 3072;
     distanceMetric = "Cosine";
     batchSize = 100;
     minContentLength = 10;
-    obsidianDirectories = [];
+    obsidianDirectories = [ ];
   };
 
-in stdenv.mkDerivation {
+in
+stdenv.mkDerivation {
   pname = "qdrant-upload";
   inherit version;
 
@@ -132,4 +133,4 @@ in stdenv.mkDerivation {
     maintainers = [ "github.com/Cody-W-Tucker" ];
     platforms = platforms.all;
   };
-} 
+}

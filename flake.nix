@@ -15,13 +15,13 @@
         # Define default options (these can be overridden by package options)
         defaultOptions = {
           qdrantUrl = "http://localhost:6333";
-          defaultCollection = "main";
+          defaultCollection = "personal";
           embeddingModel = "text-embedding-3-large";
           vectorDimensions = 3072;
           distanceMetric = "Cosine";
           batchSize = 100;
           minContentLength = 10;
-          obsidianDirectories = [];
+          obsidianDirectories = [ ];
         };
 
         # Build langchain-experimental compatible with nixpkgs versions
@@ -47,51 +47,55 @@
             sha256 = "QbhXPLsbRwb3bcdpJR2Oaz5BB+zV+pfFgUGXfsGfunU=";
           };
           nativeBuildInputs = [ pkgs.python312Packages.poetry-core ];
-          propagatedBuildInputs = with pkgs.python312Packages; [ 
+          propagatedBuildInputs = with pkgs.python312Packages; [
             langchain
             qdrant-client
           ];
         };
 
         # Function to create a Python environment with specific package versions and config
-        mkPythonEnv = { 
-          qdrantUrl ? defaultOptions.qdrantUrl,
-          defaultCollection ? defaultOptions.defaultCollection,
-          embeddingModel ? defaultOptions.embeddingModel, 
-          vectorDimensions ? defaultOptions.vectorDimensions,
-          distanceMetric ? defaultOptions.distanceMetric,
-          batchSize ? defaultOptions.batchSize,
-          minContentLength ? defaultOptions.minContentLength,
-          obsidianDirectories ? defaultOptions.obsidianDirectories
-        }: (pkgs.python312.withPackages (ps: with ps; [
-          python-dotenv
-          qdrant-client
-          # Use packages from nixpkgs
-          langchain
-          langchain-community
-          langchain-openai
-          langchain-text-splitters
-          unstructured
-          jq
-          # Our custom packages
-          langchain-experimental
-          langchain-qdrant
-        ])).overrideAttrs (old: {
-          passthru = { inherit qdrantUrl defaultCollection embeddingModel vectorDimensions 
-                       distanceMetric batchSize minContentLength obsidianDirectories; };
-        });
-      in {
+        mkPythonEnv =
+          { qdrantUrl ? defaultOptions.qdrantUrl
+          , defaultCollection ? defaultOptions.defaultCollection
+          , embeddingModel ? defaultOptions.embeddingModel
+          , vectorDimensions ? defaultOptions.vectorDimensions
+          , distanceMetric ? defaultOptions.distanceMetric
+          , batchSize ? defaultOptions.batchSize
+          , minContentLength ? defaultOptions.minContentLength
+          , obsidianDirectories ? defaultOptions.obsidianDirectories
+          }: (pkgs.python312.withPackages (ps: with ps; [
+            python-dotenv
+            qdrant-client
+            # Use packages from nixpkgs
+            langchain
+            langchain-community
+            langchain-openai
+            langchain-text-splitters
+            unstructured
+            jq
+            # Our custom packages
+            langchain-experimental
+            langchain-qdrant
+          ])).overrideAttrs (old: {
+            passthru = {
+              inherit qdrantUrl defaultCollection embeddingModel vectorDimensions
+                distanceMetric batchSize minContentLength obsidianDirectories;
+            };
+          });
+      in
+      {
         inherit defaultOptions langchain-experimental langchain-qdrant mkPythonEnv;
       };
 
       # Helper function to create a shell with default folders
-      mkDevShell = { pkgs, config ? {} }: 
+      mkDevShell = { pkgs, config ? { } }:
         let
           configUtils = makeConfig pkgs;
           options = pkgs.lib.recursiveUpdate configUtils.defaultOptions config;
           pythonEnv = configUtils.mkPythonEnv options;
           dirs = builtins.concatStringsSep " " (map (dir: ''"${dir}"'') options.obsidianDirectories);
-        in pkgs.mkShell {
+        in
+        pkgs.mkShell {
           packages = [ pythonEnv pkgs.jq ];
           shellHook = ''
             # Load .env file if it exists
@@ -143,7 +147,7 @@
         };
 
       # Create a wrapped script for uploading documents
-      mkUploader = { pkgs, config ? {} }: 
+      mkUploader = { pkgs, config ? { } }:
         let
           configUtils = makeConfig pkgs;
           options = pkgs.lib.recursiveUpdate configUtils.defaultOptions config;
@@ -235,30 +239,30 @@
     {
       # Create a NixOS module
       nixosModules.default = import ./nixos/module.nix;
-    
+
       # Create a standard package
       packages = forEachSupportedSystem ({ pkgs }: {
         default = pkgs.callPackage ./nixos/default.nix {
           version = "0.1.0";
         };
-        
-        custom = mkUploader { 
+
+        custom = mkUploader {
           inherit pkgs;
-          config = {}; 
+          config = { };
         };
       });
-      
+
       # Development shells
       devShells = forEachSupportedSystem ({ pkgs }: {
-        default = mkDevShell { 
-          inherit pkgs; 
-          config = { 
-            obsidianDirectories = [ "$HOME/Documents/Personal/Journal" "$HOME/Documents/Personal/Knowledge" ]; 
+        default = mkDevShell {
+          inherit pkgs;
+          config = {
+            obsidianDirectories = [ "$HOME/Documents/Personal/Journal" "$HOME/Documents/Personal/Knowledge" ];
           };
         };
-        custom = mkDevShell { inherit pkgs; config = {}; }; # No defaults, rely on QDRANT_FOLDERS
+        custom = mkDevShell { inherit pkgs; config = { }; }; # No defaults, rely on QDRANT_FOLDERS
       });
-      
+
       # Define apps
       apps = forEachSupportedSystem ({ pkgs }: {
         default = {

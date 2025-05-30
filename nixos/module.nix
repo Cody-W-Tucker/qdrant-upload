@@ -4,13 +4,14 @@ with lib;
 
 let
   cfg = config.services.qdrant-upload;
-in {
+in
+{
   options.services.qdrant-upload = {
     enable = mkEnableOption "Enable the Qdrant document uploader service";
 
     package = mkOption {
       type = types.package;
-      default = pkgs.callPackage ./default.nix {};
+      default = pkgs.callPackage ./default.nix { };
       description = "The Qdrant uploader package to use";
     };
 
@@ -22,7 +23,7 @@ in {
 
     defaultCollection = mkOption {
       type = types.str;
-      default = "main";
+      default = "personal";
       description = "Default collection name to use";
     };
 
@@ -43,7 +44,7 @@ in {
       default = "Cosine";
       description = "Distance metric to use for vector similarity";
     };
-    
+
     batchSize = mkOption {
       type = types.int;
       default = 100;
@@ -58,7 +59,7 @@ in {
 
     obsidianDirectories = mkOption {
       type = types.listOf types.str;
-      default = [];
+      default = [ ];
       description = "Default Obsidian vault directories to process";
     };
 
@@ -67,31 +68,31 @@ in {
       default = null;
       description = "Path to environment file containing OPENAI_API_KEY";
     };
-    
+
     defaultDocumentType = mkOption {
       type = types.enum [ "general" "obsidian" "chat" ];
       default = "general";
       description = "Default document type to process";
     };
-    
+
     user = mkOption {
       type = types.str;
       default = "nobody";
       description = "User to run the service as";
     };
-    
+
     group = mkOption {
       type = types.str;
       default = "nobody";
       description = "Group to run the service as";
     };
-    
+
     enableService = mkOption {
       type = types.bool;
       default = false;
       description = "Enable the Qdrant uploader systemd service";
     };
-    
+
     serviceSchedule = mkOption {
       type = types.str;
       default = "*-*-* 00:00:00"; # Daily at midnight
@@ -100,12 +101,12 @@ in {
   };
 
   config = mkIf cfg.enable {
-    environment.systemPackages = [ 
-      cfg.package 
+    environment.systemPackages = [
+      cfg.package
       # Add unstructured-api for better document format support
       pkgs.unstructured-api
     ];
-    
+
     environment.variables = {
       QDRANT_UPLOAD_URL = cfg.qdrantUrl;
       QDRANT_UPLOAD_COLLECTION = cfg.defaultCollection;
@@ -116,14 +117,14 @@ in {
       QDRANT_UPLOAD_MIN_LENGTH = toString cfg.minContentLength;
       QDRANT_FOLDERS = concatStringsSep " " cfg.obsidianDirectories;
     };
-    
+
     # Add systemd service and timer if enabled
     systemd.services.qdrant-upload = mkIf cfg.enableService {
       description = "Qdrant Document Upload Service";
       after = [ "network.target" ];
       wantedBy = mkIf (cfg.serviceSchedule == null) [ "multi-user.target" ];
       path = [ cfg.package ];
-      
+
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${cfg.package}/bin/qdrant-upload ${cfg.defaultDocumentType} --collection ${cfg.defaultCollection}";
@@ -131,14 +132,14 @@ in {
         Group = cfg.group;
       } // (if cfg.environmentFile != null then {
         EnvironmentFile = cfg.environmentFile;
-      } else {});
+      } else { });
     };
-    
+
     # Add timer for scheduled execution
     systemd.timers.qdrant-upload = mkIf (cfg.enableService && cfg.serviceSchedule != null) {
       description = "Timer for Qdrant Document Upload Service";
       wantedBy = [ "timers.target" ];
-      
+
       timerConfig = {
         OnCalendar = cfg.serviceSchedule;
         Unit = "qdrant-upload.service";
@@ -146,4 +147,4 @@ in {
       };
     };
   };
-} 
+}
