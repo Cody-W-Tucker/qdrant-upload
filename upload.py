@@ -19,12 +19,12 @@ if not OPENAI_API_KEY:
 
 # Load configurables from environment variables with defaults
 QDRANT_URL = os.getenv("QDRANT_UPLOAD_URL", "http://qdrant.homehub.tv")
-DEFAULT_COLLECTION = os.getenv("QDRANT_UPLOAD_COLLECTION", "personal")
+DEFAULT_COLLECTION = os.getenv("QDRANT_UPLOAD_COLLECTION", "inbox")
 EMBEDDING_MODEL = os.getenv("QDRANT_UPLOAD_MODEL", "text-embedding-3-large")
 VECTOR_DIMENSIONS = int(os.getenv("QDRANT_UPLOAD_DIMENSIONS", "3072"))
 DISTANCE_METRIC = os.getenv("QDRANT_UPLOAD_DISTANCE", "Cosine")
 BATCH_SIZE = int(os.getenv("QDRANT_UPLOAD_BATCH_SIZE", "100"))
-MIN_CONTENT_LENGTH = int(os.getenv("QDRANT_UPLOAD_MIN_LENGTH", "10"))
+MIN_CONTENT_LENGTH = int(os.getenv("QDRANT_UPLOAD_MIN_LENGTH", "50"))
 
 # Map distance metric string to Qdrant Distance enum
 DISTANCE_MAP = {
@@ -337,20 +337,26 @@ def collect_chat_documents(json_file, batch_size_for_chunking=100):
         return iter([]) # Ensure it still returns an iterable in case of error
 
 # Function to filter out empty or very short documents
-def filter_documents(docs, min_content_length=MIN_CONTENT_LENGTH):
+def filter_documents(docs, min_word_count=MIN_CONTENT_LENGTH):
     filtered_docs = []
     skipped = 0
     
     for doc in docs:
-        if not doc.page_content or len(doc.page_content.strip()) < min_content_length:
+        content = doc.page_content.strip()
+        if not content:
+            skipped += 1
+            continue
+        word_count = len(content.split())
+        if word_count < min_word_count:
             skipped += 1
             continue
         filtered_docs.append(doc)
     
     if skipped > 0:
-        print(f"Skipped {skipped} documents with insufficient content (less than {min_content_length} chars)")
+        print(f"Skipped {skipped} documents with insufficient content (less than {min_word_count} words)")
     
     return filtered_docs
+
 
 # Initialize embeddings
 embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)

@@ -20,7 +20,7 @@
           vectorDimensions = 3072;
           distanceMetric = "Cosine";
           batchSize = 100;
-          minContentLength = 10;
+          minContentLength = 50;
           obsidianDirectories = [ ];
         };
 
