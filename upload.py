@@ -10,11 +10,21 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, Filter, FieldCondition, MatchValue
 from qdrant_client.http.exceptions import UnexpectedResponse
 import time
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
+    logger.error("OPENAI_API_KEY not found in .env file")
     raise ValueError("OPENAI_API_KEY not found in .env file")
 
 # Load configurables from environment variables with defaults
@@ -56,9 +66,9 @@ if args.dirs is None and os.environ.get('QDRANT_FOLDERS'):
     # Split the environment variable on spaces
     qdrant_folders = os.environ.get('QDRANT_FOLDERS').split()
     if qdrant_folders:
-        print(f"Using default directories from QDRANT_FOLDERS environment variable:")
+        logger.info("Using default directories from QDRANT_FOLDERS environment variable:")
         for dir in qdrant_folders:
-            print(f"  - {dir}")
+            logger.info(f"  - {dir}")
         args.dirs = qdrant_folders
 
 headers_to_split_on = [
@@ -99,7 +109,7 @@ def collect_general_documents(directories, custom_source=None):
     # Process each directory individually
     for directory_path in directories:
         if not os.path.exists(directory_path):
-            print(f"Warning: Directory '{directory_path}' does not exist. Skipping.")
+            logger.warning(f"Warning: Directory '{directory_path}' does not exist. Skipping.")
             continue
         
         # Load Markdown files
@@ -147,9 +157,9 @@ def collect_general_documents(directories, custom_source=None):
                     chunk.metadata['chunk_id'] = f"{base_metadata.get('source', 'unknown_md_file')}_md_part_{i}"
                 
                 all_final_split_documents.extend(final_splits_for_file)
-                print(f"Processed Markdown file: {md_file_path}, found {len(final_splits_for_file)} chunks.")
+                logger.info(f"Processed Markdown file: {md_file_path}, found {len(final_splits_for_file)} chunks.")
             except Exception as e:
-                print(f"Error processing Markdown file {md_file_path}: {e}")
+                logger.error(f"Error processing Markdown file {md_file_path}: {e}")
 
         # Load other file types (non-Markdown)
         try:
@@ -210,14 +220,14 @@ def collect_general_documents(directories, custom_source=None):
                     chunk.metadata['chunk_id'] = f"{chunk.metadata.get('source', 'unknown_other_file')}_other_part_{i}"
                 
                 all_final_split_documents.extend(final_splits_for_others)
-                print(f"Processed {len(final_splits_for_others)} non-Markdown chunks from {directory_path}")
+                logger.info(f"Processed {len(final_splits_for_others)} non-Markdown chunks from {directory_path}")
         except Exception as e:
-            print(f"Warning: Could not process non-Markdown files in {directory_path}: {e}")
+            logger.warning(f"Warning: Could not process non-Markdown files in {directory_path}: {e}")
             
     if not all_final_split_documents:
-        print(f"No documents could be loaded or processed from any of the specified directories.")
+        logger.warning(f"No documents could be loaded or processed from any of the specified directories.")
     else:
-        print(f"Collected a total of {len(all_final_split_documents)} chunks from general directories.")
+        logger.info(f"Collected a total of {len(all_final_split_documents)} chunks from general directories.")
             
     return all_final_split_documents
 
@@ -228,7 +238,7 @@ def collect_obsidian_documents(directories, custom_source=None):
     # Process each directory individually
     for directory_path in directories:
         if not os.path.exists(directory_path):
-            print(f"Warning: Directory '{directory_path}' does not exist. Skipping.")
+            logger.warning(f"Warning: Directory '{directory_path}' does not exist. Skipping.")
             continue
             
         try:
@@ -258,16 +268,16 @@ def collect_obsidian_documents(directories, custom_source=None):
                          doc.metadata['last_modified'] = time.time()
             
             documents.extend(docs)
-            print(f"Loaded {len(docs)} documents from {directory_path}")
+            logger.info(f"Loaded {len(docs)} documents from {directory_path}")
         except Exception as e:
-            print(f"Error loading documents from {directory_path}: {e}")
+            logger.error(f"Error loading documents from {directory_path}: {e}")
             
     return documents
 
 # Function to load chat documents (modified for streaming)
 def collect_chat_documents(json_file, batch_size_for_chunking=100):
     if not os.path.exists(json_file):
-        print(f"Warning: JSON file '{json_file}' does not exist. No documents will be loaded.")
+        logger.warning(f"Warning: JSON file '{json_file}' does not exist. No documents will be loaded.")
         return iter([]) # Return an empty iterator
     
     try:
@@ -286,24 +296,24 @@ def collect_chat_documents(json_file, batch_size_for_chunking=100):
         batch_for_chunking = []
         raw_docs_processed_count = 0
 
-        print(f"Starting to stream and process documents from {json_file}...")
+        logger.info(f"Starting to stream and process documents from {json_file}...")
 
         for doc in doc_iterator:
             batch_for_chunking.append(doc)
             if len(batch_for_chunking) >= batch_size_for_chunking:
                 current_raw_batch_size = len(batch_for_chunking)
-                print(f"Collected {current_raw_batch_size} raw messages. Preparing to chunk...")
+                logger.info(f"Collected {current_raw_batch_size} raw messages. Preparing to chunk...")
                 
                 start_chunk_time = time.time()
                 split_docs = recursive_character_splitter.split_documents(batch_for_chunking)
                 end_chunk_time = time.time()
-                print(f"Finished chunking {current_raw_batch_size} raw messages in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
+                logger.info(f"Finished chunking {current_raw_batch_size} raw messages in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
                 
                 start_filter_time = time.time()
                 filtered_split_docs = filter_documents(split_docs)
                 end_filter_time = time.time()
                 num_yielded = len(filtered_split_docs) if filtered_split_docs else 0
-                print(f"Finished filtering in {end_filter_time - start_filter_time:.2f} seconds. Yielding {num_yielded} chunks.")
+                logger.info(f"Finished filtering in {end_filter_time - start_filter_time:.2f} seconds. Yielding {num_yielded} chunks.")
 
                 if filtered_split_docs:
                     yield filtered_split_docs
@@ -313,27 +323,27 @@ def collect_chat_documents(json_file, batch_size_for_chunking=100):
         # Process any remaining documents in the last batch
         if batch_for_chunking:
             current_raw_batch_size = len(batch_for_chunking)
-            print(f"Collected final batch of {current_raw_batch_size} raw messages. Preparing to chunk...")
+            logger.info(f"Collected final batch of {current_raw_batch_size} raw messages. Preparing to chunk...")
             
             start_chunk_time = time.time()
             split_docs = recursive_character_splitter.split_documents(batch_for_chunking)
             end_chunk_time = time.time()
-            print(f"Finished chunking final {current_raw_batch_size} raw messages in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
+            logger.info(f"Finished chunking final {current_raw_batch_size} raw messages in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
             
             start_filter_time = time.time()
             filtered_split_docs = filter_documents(split_docs)
             end_filter_time = time.time()
             num_yielded = len(filtered_split_docs) if filtered_split_docs else 0
-            print(f"Finished filtering final batch in {end_filter_time - start_filter_time:.2f} seconds. Yielding {num_yielded} chunks.")
+            logger.info(f"Finished filtering final batch in {end_filter_time - start_filter_time:.2f} seconds. Yielding {num_yielded} chunks.")
 
             if filtered_split_docs:
                 yield filtered_split_docs
             raw_docs_processed_count += current_raw_batch_size
 
-        print(f"Finished streaming and processing. Total raw chat messages processed from {json_file}: {raw_docs_processed_count}")
+        logger.info(f"Finished streaming and processing. Total raw chat messages processed from {json_file}: {raw_docs_processed_count}")
 
     except Exception as e:
-        print(f"Error during streaming chat documents from {json_file}: {e}")
+        logger.error(f"Error during streaming chat documents from {json_file}: {e}")
         return iter([]) # Ensure it still returns an iterable in case of error
 
 # Function to filter out empty or very short documents
@@ -353,7 +363,7 @@ def filter_documents(docs, min_word_count=MIN_CONTENT_LENGTH):
         filtered_docs.append(doc)
     
     if skipped > 0:
-        print(f"Skipped {skipped} documents with insufficient content (less than {min_word_count} words)")
+        logger.info(f"Skipped {skipped} documents with insufficient content (less than {min_word_count} words)")
     
     return filtered_docs
 
@@ -362,45 +372,45 @@ def filter_documents(docs, min_word_count=MIN_CONTENT_LENGTH):
 embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)
 
 # Set up Qdrant client and collection
-print(f"Connecting to Qdrant at {QDRANT_URL}...")
+logger.info(f"Connecting to Qdrant at {QDRANT_URL}...")
 client = QdrantClient(url=QDRANT_URL, prefer_grpc=False)
 
 # Check Qdrant connection and server status
 try:
     # Try a basic operation like listing collections to verify connection
     client.get_collections() # This will raise an exception if the server is not reachable
-    print(f"Successfully connected to Qdrant server at {QDRANT_URL} and was able to list collections.")
+    logger.info(f"Successfully connected to Qdrant server at {QDRANT_URL} and was able to list collections.")
 except Exception as conn_e:
-    print(f"Error: Could not connect to or communicate effectively with Qdrant server at {QDRANT_URL}.")
-    print(f"Details: {conn_e}")
-    print("Please ensure the Qdrant server is running, accessible, and properly configured.")
+    logger.error(f"Could not connect to or communicate effectively with Qdrant server at {QDRANT_URL}.")
+    logger.error(f"Details: {conn_e}")
+    logger.error("Please ensure the Qdrant server is running, accessible, and properly configured.")
     exit(1)
 
 collection_name = args.collection
 try:
-    print(f"Checking for existing collection: '{collection_name}'...")
+    logger.info(f"Checking for existing collection: '{collection_name}'...")
     client.get_collection(collection_name)
-    print(f"Collection '{collection_name}' already exists. Adding documents to it.")
+    logger.info(f"Collection '{collection_name}' already exists. Adding documents to it.")
 except UnexpectedResponse as e:
     if e.status_code == 404: # Not found
-        print(f"Collection '{collection_name}' not found. Creating new collection.")
+        logger.info(f"Collection '{collection_name}' not found. Creating new collection.")
         try:
             client.create_collection(
                 collection_name=collection_name,
                 vectors_config=VectorParams(size=VECTOR_DIMENSIONS, distance=DISTANCE_MAP[DISTANCE_METRIC]),
             )
-            print(f"Successfully created collection '{collection_name}'.")
+            logger.info(f"Successfully created collection '{collection_name}'.")
         except Exception as create_error:
-            print(f"Error: Could not create collection '{collection_name}'.")
-            print(f"Details: {create_error}")
+            logger.error(f"Could not create collection '{collection_name}'.")
+            logger.error(f"Details: {create_error}")
             exit(1)
     else:
-        print(f"Error: An unexpected issue occurred while checking for collection '{collection_name}'.")
-        print(f"Details: {e}")
+        logger.error(f"An unexpected issue occurred while checking for collection '{collection_name}'.")
+        logger.error(f"Details: {e}")
         exit(1)
 except Exception as e: # Catch other potential errors like network issues during get_collection
-    print(f"Error: Could not verify collection '{collection_name}' due to an unexpected error.")
-    print(f"Details: {e}")
+    logger.error(f"Could not verify collection '{collection_name}' due to an unexpected error.")
+    logger.error(f"Details: {e}")
     exit(1)
 
 # Initialize vector store
@@ -413,11 +423,11 @@ vector_store = QdrantVectorStore(
 # Validate required arguments
 directories_to_process = args.dirs or []
 if args.type in ['general', 'obsidian'] and not directories_to_process:
-    print(f"Error: No directories specified for {args.type} document type. Use --dirs to specify directories.")
+    logger.error(f"Error: No directories specified for {args.type} document type. Use --dirs to specify directories.")
     exit(1)
 
 if args.type == 'chat' and not args.json_file:
-    print("Error: --json-file is required for chat document type")
+    logger.error("Error: --json-file is required for chat document type")
     exit(1)
 
 # Load documents based on the specified type
@@ -426,29 +436,29 @@ if args.type == 'general':
     docs = filter_documents(docs) # Filter empty/short documents
 
     if not docs:
-        print("No general documents to upload after filtering. Exiting.")
+        logger.warning("No general documents to upload after filtering. Exiting.")
         exit(0)
 
     total_words = sum(len(doc.page_content.split()) for doc in docs)
-    print(f"{len(docs)} general documents loaded with a total of {total_words:,} words.")
+    logger.info(f"{len(docs)} general documents loaded with a total of {total_words:,} words.")
     
-    print(f"Uploading {len(docs)} general documents to collection '{args.collection}'...")
+    logger.info(f"Uploading {len(docs)} general documents to collection '{args.collection}'...")
     for i in range(0, len(docs), BATCH_SIZE):
         batch_docs = docs[i:i+BATCH_SIZE]
         vector_store.add_documents(batch_docs)
-        print(f"Uploaded batch {i//BATCH_SIZE + 1}/{(len(docs)-1)//BATCH_SIZE + 1} ({len(batch_docs)} documents)")
+        logger.info(f"Uploaded batch {i//BATCH_SIZE + 1}/{(len(docs)-1)//BATCH_SIZE + 1} ({len(batch_docs)} documents)")
     
-    print(f"Successfully processed {len(docs)} general documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
+    logger.info(f"Successfully processed {len(docs)} general documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
 
 elif args.type == 'obsidian':
-    print(f"Processing Obsidian documents with update checks from: {directories_to_process}")
+    logger.info(f"Processing Obsidian documents with update checks from: {directories_to_process}")
     
     raw_docs = collect_obsidian_documents(directories_to_process, args.source)
     # Note: Filtering for Obsidian docs is handled implicitly by checking content for updates/existence.
     # If needed, filter_documents can be applied to raw_docs before the docs_by_source grouping.
 
     if not raw_docs:
-        print("No Obsidian documents found to process. Exiting.")
+        logger.info("No Obsidian documents found to process. Exiting.")
         exit(0)
 
     docs_by_source = {}
@@ -460,7 +470,7 @@ elif args.type == 'obsidian':
 
     # Cull remote obsidian sources that are no longer present locally
     local_sources = set(docs_by_source.keys())
-    print(f"Culling remote obsidian sources not present locally. Local sources: {sorted(local_sources)}")
+    logger.info(f"Culling remote obsidian sources not present locally. Local sources: {sorted(local_sources)}")
     remote_sources = set()
     offset = None
     limit = BATCH_SIZE
@@ -494,10 +504,10 @@ elif args.type == 'obsidian':
                     must=[FieldCondition(key="metadata.source", match=MatchValue(value=src))]
                 )
             )
-            print(f"Deleted remote obsidian source no longer present: {src}")
-        print(f"Culled {len(to_delete)} remote source(s) from collection.")
+            logger.info(f"Deleted remote obsidian source no longer present: {src}")
+        logger.info(f"Culled {len(to_delete)} remote source(s) from collection.")
     else:
-        print("No remote obsidian sources to cull.")
+        logger.info("No remote obsidian sources to cull.")
     
     total_processed_sources = 0
     total_skipped_sources = 0
@@ -515,7 +525,7 @@ elif args.type == 'obsidian':
         # We do this on a per-source basis to keep the logic contained.
         filtered_source_docs = filter_documents(source_docs)
         if not filtered_source_docs:
-            print(f"Skipping source '{source}' as all its content is too short after filtering.")
+            logger.info(f"Skipping source '{source}' as all its content is too short after filtering.")
             total_skipped_sources +=1
             continue
 
@@ -536,7 +546,7 @@ elif args.type == 'obsidian':
             )
             
             if search_results[0]:
-                print(f"Skipping existing document source: {source}")
+                logger.info(f"Skipping existing document source: {source}")
                 total_skipped_sources += 1
                 needs_processing = False
         
@@ -563,7 +573,7 @@ elif args.type == 'obsidian':
                 stored_last_modified = stored_meta.get('last_modified', 0)
                 
                 if local_last_modified <= stored_last_modified:
-                    print(f"Skipping unchanged document source: {source}")
+                    logger.info(f"Skipping unchanged document source: {source}")
                     total_skipped_sources += 1
                     needs_processing = False
         
@@ -584,15 +594,15 @@ elif args.type == 'obsidian':
             docs_to_chunk_and_upload.extend(filtered_source_docs)
             
             if existing_doc_found:
-                print(f"Marked document source for update: {source}")
+                logger.info(f"Marked document source for update: {source}")
                 total_updated_sources += 1
             else:
-                print(f"Marked new document source for adding: {source}")
+                logger.info(f"Marked new document source for adding: {source}")
                 total_added_sources += 1
             total_processed_sources +=1
     
     if docs_to_chunk_and_upload:
-        print(f"Applying header and recursive splitting to {len(docs_to_chunk_and_upload)} Obsidian documents from {total_processed_sources} sources...")
+        logger.info(f"Applying header and recursive splitting to {len(docs_to_chunk_and_upload)} Obsidian documents from {total_processed_sources} sources...")
         all_final_chunks_for_obsidian_upload = []
         for doc_to_process in docs_to_chunk_and_upload: # These are full documents for sources that need update/add
             original_metadata = doc_to_process.metadata.copy() # Already enriched by collect_obsidian_documents
@@ -614,28 +624,28 @@ elif args.type == 'obsidian':
                 chunk.metadata['chunk_id'] = f"{chunk.metadata.get('source', 'unknown_obsidian_file')}_obs_part_{i}"
 
             all_final_chunks_for_obsidian_upload.extend(final_chunks_for_file)
-        print(f"Finished splitting. Produced {len(all_final_chunks_for_obsidian_upload)} chunks for upload.")
+        logger.info(f"Finished splitting. Produced {len(all_final_chunks_for_obsidian_upload)} chunks for upload.")
         
         split_docs_for_upload = all_final_chunks_for_obsidian_upload
         total_chunks_uploaded = len(split_docs_for_upload)
 
-        print(f"Uploading {total_chunks_uploaded} chunks from {total_processed_sources} sources...")
+        logger.info(f"Uploading {total_chunks_uploaded} chunks from {total_processed_sources} sources...")
         for i in range(0, len(split_docs_for_upload), BATCH_SIZE):
             batch_docs = split_docs_for_upload[i:i+BATCH_SIZE]
             vector_store.add_documents(batch_docs)
-            print(f"Uploaded batch {i//BATCH_SIZE + 1}/{(len(split_docs_for_upload)-1)//BATCH_SIZE + 1} ({len(batch_docs)} chunks)")
+            logger.info(f"Uploaded batch {i//BATCH_SIZE + 1}/{(len(split_docs_for_upload)-1)//BATCH_SIZE + 1} ({len(batch_docs)} chunks)")
     else:
-        print("No Obsidian documents required chunking or uploading.")
+        logger.info("No Obsidian documents required chunking or uploading.")
     
-    print(f"\nObsidian document processing complete:")
-    print(f"  - New document sources added: {total_added_sources}")
-    print(f"  - Existing document sources updated: {total_updated_sources}")
-    print(f"  - Document sources skipped (unchanged or already exists): {total_skipped_sources}")
-    print(f"  - Total chunks uploaded: {total_chunks_uploaded}")
-    print(f"Successfully processed Obsidian documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
+    logger.info(f"\nObsidian document processing complete:")
+    logger.info(f"  - New document sources added: {total_added_sources}")
+    logger.info(f"  - Existing document sources updated: {total_updated_sources}")
+    logger.info(f"  - Document sources skipped (unchanged or already exists): {total_skipped_sources}")
+    logger.info(f"  - Total chunks uploaded: {total_chunks_uploaded}")
+    logger.info(f"Successfully processed Obsidian documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
 
 elif args.type == 'chat':
-    print(f"Processing chat documents from: {args.json_file} (streaming)")
+    logger.info(f"Processing chat documents from: {args.json_file} (streaming)")
     # collect_chat_documents is now a generator yielding batches of *already filtered and split* docs
     doc_batch_generator = collect_chat_documents(args.json_file, batch_size_for_chunking=100) # Internal batch size for chunking
     
@@ -652,26 +662,26 @@ elif args.type == 'chat':
         num_docs_in_batch = len(doc_batch)
         total_chunks_uploaded_chat += num_docs_in_batch
         
-        print(f"Uploading chat document batch {batch_num} with {num_docs_in_batch} chunks to collection '{args.collection}'...")
+        logger.info(f"Uploading chat document batch {batch_num} with {num_docs_in_batch} chunks to collection '{args.collection}'...")
         # Qdrant's add_documents can handle a list of documents directly for batching.
         # The BATCH_SIZE constant is for Qdrant client library internal batching, not what we do here.
         # However, the vector_store.add_documents method uses its own batching if the list is large.
         # We are essentially feeding it pre-batched chunks from our generator.
         vector_store.add_documents(doc_batch) # This will further batch if doc_batch is > BATCH_SIZE
-        print(f"Uploaded chat batch {batch_num} ({num_docs_in_batch} chunks).")
+        logger.info(f"Uploaded chat batch {batch_num} ({num_docs_in_batch} chunks).")
 
     if not any_docs_processed:
-        print("No chat documents were processed or yielded from the generator. Exiting.")
+        logger.warning("No chat documents were processed or yielded from the generator. Exiting.")
         exit(0)
 
-    print(f"\nChat document streaming and upload complete:")
-    print(f"  - Total chunks uploaded: {total_chunks_uploaded_chat}")
-    print(f"Successfully processed chat documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
+    logger.info(f"\nChat document streaming and upload complete:")
+    logger.info(f"  - Total chunks uploaded: {total_chunks_uploaded_chat}")
+    logger.info(f"Successfully processed chat documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
 
 else:
-    print(f"Error: Unknown document type specified: {args.type}")
+    logger.error(f"Error: Unknown document type specified: {args.type}")
     exit(1)
 
 # General success message parts, can be enhanced per type if needed
 if args.source:
-    print(f"All documents processed were intended to be tagged with custom source: '{args.source}'") 
+    logger.info(f"All documents processed were intended to be tagged with custom source: '{args.source}'") 
