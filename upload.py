@@ -11,8 +11,6 @@ from qdrant_client.http.models import Distance, VectorParams, Filter, FieldCondi
 from qdrant_client.http.exceptions import UnexpectedResponse
 import time
 import logging
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
 
 # Configure logging
 logging.basicConfig(
@@ -21,96 +19,6 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
-
-@dataclass
-class DocumentMetadata:
-    """Structured metadata for documents being processed and uploaded to Qdrant."""
-    source: str
-    original_file_path: str
-    source_directory: str
-    last_modified: float
-    chunk_id: Optional[str] = None
-    header_level: Optional[int] = None
-    role: Optional[str] = None
-    model_name: Optional[str] = None
-    timestamp: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert metadata to dictionary format expected by LangChain and Qdrant."""
-        metadata = {
-            'source': self.source,
-            'original_file_path': self.original_file_path,
-            'source_directory': self.source_directory,
-            'last_modified': self.last_modified,
-        }
-        # Only add optional fields if they have values
-        if self.chunk_id:
-            metadata['chunk_id'] = self.chunk_id
-        if self.header_level:
-            metadata['header_level'] = self.header_level
-        if self.role:
-            metadata['role'] = self.role
-        if self.model_name:
-            metadata['model_name'] = self.model_name
-        if self.timestamp:
-            metadata['timestamp'] = self.timestamp
-        return metadata
-
-class MetadataFactory:
-    """Factory for creating and managing document metadata."""
-    
-    @staticmethod
-    def from_document(doc: Any, directory_path: str, custom_source: Optional[str] = None) -> DocumentMetadata:
-        """Create metadata from a document object."""
-        base = doc.metadata.copy() if doc.metadata else {}
-        file_path = base.get('path') or base.get('source') or 'unknown_path'
-        
-        # Ensure we have an absolute path
-        if not os.path.isabs(file_path):
-            file_path = os.path.join(directory_path, file_path)
-            
-        return DocumentMetadata(
-            source=custom_source or base.get('source', os.path.basename(file_path)),
-            original_file_path=file_path,
-            source_directory=directory_path,
-            last_modified=base.get('last_modified', time.time())
-        )
-
-    @staticmethod
-    def from_chat_record(record: Dict[str, Any], custom_source: Optional[str] = None) -> DocumentMetadata:
-        """Create metadata from a chat record."""
-        return DocumentMetadata(
-            source=custom_source or f"chat_{record.get('id', 'unknown')}",
-            original_file_path="chat_record",
-            source_directory="chat",
-            last_modified=time.time(),
-            role=record.get('role'),
-            model_name=record.get('modelName') or record.get('model'),
-            timestamp=record.get('timestamp')
-        )
-
-    @staticmethod
-    def create_chunk_metadata(base_metadata: DocumentMetadata, chunk_index: int, doc_type: str) -> DocumentMetadata:
-        """Create metadata for a document chunk."""
-        return DocumentMetadata(
-            source=base_metadata.source,
-            original_file_path=base_metadata.original_file_path,
-            source_directory=base_metadata.source_directory,
-            last_modified=base_metadata.last_modified,
-            chunk_id=f"{base_metadata.source}_{doc_type}_part_{chunk_index}"
-        )
-
-    @staticmethod
-    def merge_with_header(metadata: DocumentMetadata, header_metadata: Dict[str, Any]) -> DocumentMetadata:
-        """Merge base metadata with header metadata."""
-        return DocumentMetadata(
-            source=metadata.source,
-            original_file_path=metadata.original_file_path,
-            source_directory=metadata.source_directory,
-            last_modified=metadata.last_modified,
-            chunk_id=metadata.chunk_id,
-            header_level=header_metadata.get('Header Level')
-        )
 
 # Load environment variables from .env file
 load_dotenv()
@@ -183,9 +91,16 @@ recursive_character_splitter = RecursiveCharacterTextSplitter(
 
 # Function to extract metadata for chat documents
 def extract_chat_metadata(record: dict, metadata: dict) -> dict:
-    """Extract metadata from a chat record and convert it to the format expected by LangChain."""
-    doc_metadata = MetadataFactory.from_chat_record(record, args.source)
-    return doc_metadata.to_dict()
+    metadata["id"] = record.get("id", "")
+    metadata["parentId"] = record.get("parentId", "")
+    metadata["role"] = record.get("role", "")
+    metadata["modelName"] = record.get("modelName") or record.get("model", "")
+    metadata["timestamp"] = record.get("timestamp", "")
+    if args.source:
+        metadata["source"] = args.source
+    else:
+        metadata["source"] = f"chat_{record.get('id', 'unknown')}"
+    return metadata
 
 # Function to load general documents from multiple directories
 def collect_general_documents(directories, custom_source=None):
@@ -194,7 +109,7 @@ def collect_general_documents(directories, custom_source=None):
     # Process each directory individually
     for directory_path in directories:
         if not os.path.exists(directory_path):
-            logger.warning(f"Directory '{directory_path}' does not exist. Skipping.")
+            logger.warning(f"Warning: Directory '{directory_path}' does not exist. Skipping.")
             continue
         
         # Load Markdown files
@@ -212,21 +127,34 @@ def collect_general_documents(directories, custom_source=None):
                     continue
                 
                 original_doc = loaded_file_doc_list[0]
-                base_metadata = MetadataFactory.from_document(original_doc, directory_path, custom_source)
+                base_metadata = original_doc.metadata.copy() if original_doc.metadata else {}
+                base_metadata['original_file_path'] = md_file_path
+
+                if custom_source:
+                    base_metadata['source'] = custom_source
+                elif 'source' not in base_metadata : # TextLoader puts filename in 'source'
+                    base_metadata['source'] = os.path.basename(md_file_path)
                 
+                base_metadata['source_directory'] = directory_path
+                try:
+                    base_metadata['last_modified'] = os.path.getmtime(md_file_path)
+                except OSError:
+                    base_metadata['last_modified'] = time.time()
+
                 header_split_docs = markdown_header_splitter.split_text(original_doc.page_content)
                 
                 docs_for_recursive_split = []
                 for h_split_doc in header_split_docs:
-                    merged_metadata = MetadataFactory.merge_with_header(base_metadata, h_split_doc.metadata)
-                    h_split_doc.metadata = merged_metadata.to_dict()
+                    merged_metadata = base_metadata.copy()
+                    merged_metadata.update(h_split_doc.metadata) # h_split_doc.metadata has 'Header N'
+                    h_split_doc.metadata = merged_metadata
                     docs_for_recursive_split.append(h_split_doc)
 
                 final_splits_for_file = recursive_character_splitter.split_documents(docs_for_recursive_split)
                 
                 for i, chunk in enumerate(final_splits_for_file):
-                    chunk_metadata = MetadataFactory.create_chunk_metadata(base_metadata, i, 'md')
-                    chunk.metadata = chunk_metadata.to_dict()
+                    if not chunk.metadata: chunk.metadata = {}
+                    chunk.metadata['chunk_id'] = f"{base_metadata.get('source', 'unknown_md_file')}_md_part_{i}"
                 
                 all_final_split_documents.extend(final_splits_for_file)
                 logger.info(f"Processed Markdown file: {md_file_path}, found {len(final_splits_for_file)} chunks.")
@@ -246,26 +174,58 @@ def collect_general_documents(directories, custom_source=None):
             )
             other_raw_docs = dir_loader.load()
             
+            processed_other_docs_for_dir = []
             if other_raw_docs:
                 docs_for_recursive_split_others = []
                 for doc in other_raw_docs:
-                    base_metadata = MetadataFactory.from_document(doc, directory_path, custom_source)
-                    doc.metadata = base_metadata.to_dict()
+                    base_metadata = doc.metadata.copy() if doc.metadata else {}
+                    
+                    # DirectoryLoader 'source' is usually path relative to loaded dir or absolute.
+                    # Let's try to ensure original_file_path is absolute or clearly identifiable.
+                    file_path_from_meta = base_metadata.get('source', base_metadata.get('path'))
+                    if file_path_from_meta:
+                        if not os.path.isabs(file_path_from_meta):
+                           base_metadata['original_file_path'] = os.path.join(directory_path, file_path_from_meta)
+                        else:
+                           base_metadata['original_file_path'] = file_path_from_meta
+                    else:
+                        base_metadata['original_file_path'] = "unknown_path"
+
+
+                    if custom_source:
+                        base_metadata['source'] = custom_source
+                    elif 'source' not in base_metadata and file_path_from_meta:
+                         base_metadata['source'] = file_path_from_meta # Use path from loader if no custom source
+                    elif 'source' not in base_metadata:
+                        base_metadata['source'] = "unknown_source"
+
+
+                    base_metadata['source_directory'] = directory_path
+                    try:
+                        fpath_for_mtime = base_metadata['original_file_path']
+                        if os.path.exists(fpath_for_mtime) and os.path.isfile(fpath_for_mtime):
+                            base_metadata['last_modified'] = os.path.getmtime(fpath_for_mtime)
+                        else:
+                            base_metadata['last_modified'] = time.time() # Fallback
+                    except Exception:
+                        base_metadata['last_modified'] = time.time()
+                    
+                    doc.metadata = base_metadata # Update doc's metadata before splitting
                     docs_for_recursive_split_others.append(doc)
 
                 final_splits_for_others = recursive_character_splitter.split_documents(docs_for_recursive_split_others)
                 
                 for i, chunk in enumerate(final_splits_for_others):
-                    chunk_metadata = MetadataFactory.create_chunk_metadata(base_metadata, i, 'other')
-                    chunk.metadata = chunk_metadata.to_dict()
+                    if not chunk.metadata: chunk.metadata = {}
+                    chunk.metadata['chunk_id'] = f"{chunk.metadata.get('source', 'unknown_other_file')}_other_part_{i}"
                 
                 all_final_split_documents.extend(final_splits_for_others)
                 logger.info(f"Processed {len(final_splits_for_others)} non-Markdown chunks from {directory_path}")
         except Exception as e:
-            logger.warning(f"Could not process non-Markdown files in {directory_path}: {e}")
+            logger.warning(f"Warning: Could not process non-Markdown files in {directory_path}: {e}")
             
     if not all_final_split_documents:
-        logger.warning("No documents could be loaded or processed from any of the specified directories.")
+        logger.warning(f"No documents could be loaded or processed from any of the specified directories.")
     else:
         logger.info(f"Collected a total of {len(all_final_split_documents)} chunks from general directories.")
             
@@ -278,7 +238,7 @@ def collect_obsidian_documents(directories, custom_source=None):
     # Process each directory individually
     for directory_path in directories:
         if not os.path.exists(directory_path):
-            logger.warning(f"Directory '{directory_path}' does not exist. Skipping.")
+            logger.warning(f"Warning: Directory '{directory_path}' does not exist. Skipping.")
             continue
             
         try:
@@ -287,8 +247,25 @@ def collect_obsidian_documents(directories, custom_source=None):
             
             # Add source info to documents
             for doc in docs:
-                base_metadata = MetadataFactory.from_document(doc, directory_path, custom_source)
-                doc.metadata = base_metadata.to_dict()
+                if not doc.metadata:
+                    doc.metadata = {}
+                
+                # ObsidianLoader provides 'path' (absolute) and 'source' (filename.md)
+                # We prefer the absolute path for 'original_file_path' for consistency
+                doc.metadata['original_file_path'] = doc.metadata.get('path', 'unknown_obsidian_path')
+
+                if custom_source:
+                    doc.metadata['source'] = custom_source
+                elif 'source' not in doc.metadata: # Should be set by ObsidianLoader
+                    doc.metadata['source'] = os.path.basename(doc.metadata.get('path', 'unknown.md'))
+                
+                doc.metadata['source_directory'] = directory_path
+                # last_modified should be provided by ObsidianLoader, if not, fallback
+                if 'last_modified' not in doc.metadata:
+                    try:
+                        doc.metadata['last_modified'] = os.path.getmtime(doc.metadata['original_file_path'])
+                    except Exception:
+                         doc.metadata['last_modified'] = time.time()
             
             documents.extend(docs)
             logger.info(f"Loaded {len(docs)} documents from {directory_path}")
@@ -628,22 +605,23 @@ elif args.type == 'obsidian':
         logger.info(f"Applying header and recursive splitting to {len(docs_to_chunk_and_upload)} Obsidian documents from {total_processed_sources} sources...")
         all_final_chunks_for_obsidian_upload = []
         for doc_to_process in docs_to_chunk_and_upload: # These are full documents for sources that need update/add
-            original_metadata = MetadataFactory.from_document(doc_to_process, doc_to_process.metadata['source_directory'])
+            original_metadata = doc_to_process.metadata.copy() # Already enriched by collect_obsidian_documents
             page_content = doc_to_process.page_content
 
             header_splits = markdown_header_splitter.split_text(page_content)
             
             current_file_chunks_for_recursive_split = []
             for h_split in header_splits:
-                merged_meta = MetadataFactory.merge_with_header(original_metadata, h_split.metadata)
-                h_split.metadata = merged_meta.to_dict()
+                merged_meta = original_metadata.copy()
+                merged_meta.update(h_split.metadata) # Add Header 1, Header 2 etc.
+                h_split.metadata = merged_meta
                 current_file_chunks_for_recursive_split.append(h_split)
                 
             final_chunks_for_file = recursive_character_splitter.split_documents(current_file_chunks_for_recursive_split)
             
             for i, chunk in enumerate(final_chunks_for_file):
-                chunk_metadata = MetadataFactory.create_chunk_metadata(original_metadata, i, 'obs')
-                chunk.metadata = chunk_metadata.to_dict()
+                if not chunk.metadata: chunk.metadata = {} # Should be populated
+                chunk.metadata['chunk_id'] = f"{chunk.metadata.get('source', 'unknown_obsidian_file')}_obs_part_{i}"
 
             all_final_chunks_for_obsidian_upload.extend(final_chunks_for_file)
         logger.info(f"Finished splitting. Produced {len(all_final_chunks_for_obsidian_upload)} chunks for upload.")
