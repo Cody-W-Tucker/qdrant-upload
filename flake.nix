@@ -16,12 +16,18 @@
         defaultOptions = {
           qdrantUrl = "http://localhost:6333";
           defaultCollection = "personal";
-          embeddingModel = "text-embedding-3-large";
-          vectorDimensions = 3072;
+          embeddingModel = "nomic-embed-text:latest";
+          vectorDimensions = 768;
           distanceMetric = "Cosine";
-          batchSize = 100;
+          batchSize = 2000; # Optimized for RTX 3070 GPU
           minContentLength = 50;
           obsidianDirectories = [ ];
+          # New async performance settings
+          chunkSize = 2500; # Larger chunks for better chat message completeness
+          chunkOverlap = 200; # Proportional overlap
+          semanticChunker = "false"; # auto=chat only, true=all, false=none (default: false for performance)
+          maxConcurrent = 4; # Optimal for RTX 3070 (8GB VRAM)
+          asyncChat = true; # Enable high-performance async processing
         };
 
         # Build langchain-experimental compatible with nixpkgs versions
@@ -63,13 +69,17 @@
           , batchSize ? defaultOptions.batchSize
           , minContentLength ? defaultOptions.minContentLength
           , obsidianDirectories ? defaultOptions.obsidianDirectories
+          , chunkSize ? defaultOptions.chunkSize
+          , chunkOverlap ? defaultOptions.chunkOverlap
+          , semanticChunker ? defaultOptions.semanticChunker
+          , maxConcurrent ? defaultOptions.maxConcurrent
+          , asyncChat ? defaultOptions.asyncChat
           }: (pkgs.python312.withPackages (ps: with ps; [
             python-dotenv
             qdrant-client
             # Use packages from nixpkgs
             langchain
             langchain-community
-            langchain-openai
             langchain-text-splitters
             unstructured
             jq
@@ -79,7 +89,8 @@
           ])).overrideAttrs (old: {
             passthru = {
               inherit qdrantUrl defaultCollection embeddingModel vectorDimensions
-                distanceMetric batchSize minContentLength obsidianDirectories;
+                distanceMetric batchSize minContentLength obsidianDirectories
+                chunkSize chunkOverlap semanticChunker maxConcurrent asyncChat;
             };
           });
       in
@@ -115,6 +126,13 @@
             export QDRANT_UPLOAD_BATCH_SIZE="''${QDRANT_UPLOAD_BATCH_SIZE:-${toString options.batchSize}}"
             export QDRANT_UPLOAD_MIN_LENGTH="''${QDRANT_UPLOAD_MIN_LENGTH:-${toString options.minContentLength}}"
             
+            # New async performance variables (RTX 3070 optimized)
+            export QDRANT_UPLOAD_CHUNK_SIZE="''${QDRANT_UPLOAD_CHUNK_SIZE:-${toString options.chunkSize}}"
+            export QDRANT_UPLOAD_CHUNK_OVERLAP="''${QDRANT_UPLOAD_CHUNK_OVERLAP:-${toString options.chunkOverlap}}"
+            export QDRANT_UPLOAD_SEMANTIC_CHUNKER="''${QDRANT_UPLOAD_SEMANTIC_CHUNKER:-${options.semanticChunker}}"
+            export QDRANT_UPLOAD_MAX_CONCURRENT="''${QDRANT_UPLOAD_MAX_CONCURRENT:-${toString options.maxConcurrent}}"
+            export QDRANT_UPLOAD_ASYNC_CHAT="''${QDRANT_UPLOAD_ASYNC_CHAT:-${if options.asyncChat then "true" else "false"}}"
+
             # Use QDRANT_FOLDERS if set, otherwise fall back to obsidianDirectories
             if [ -n "$QDRANT_FOLDERS" ]; then
               IFS=' ' read -r -a DIRS_TO_PROCESS <<< "$QDRANT_FOLDERS"
@@ -178,6 +196,13 @@
             export QDRANT_UPLOAD_BATCH_SIZE="''${QDRANT_UPLOAD_BATCH_SIZE:-${toString options.batchSize}}"
             export QDRANT_UPLOAD_MIN_LENGTH="''${QDRANT_UPLOAD_MIN_LENGTH:-${toString options.minContentLength}}"
             
+            # New async performance variables (RTX 3070 optimized)
+            export QDRANT_UPLOAD_CHUNK_SIZE="''${QDRANT_UPLOAD_CHUNK_SIZE:-${toString options.chunkSize}}"
+            export QDRANT_UPLOAD_CHUNK_OVERLAP="''${QDRANT_UPLOAD_CHUNK_OVERLAP:-${toString options.chunkOverlap}}"
+            export QDRANT_UPLOAD_SEMANTIC_CHUNKER="''${QDRANT_UPLOAD_SEMANTIC_CHUNKER:-${options.semanticChunker}}"
+            export QDRANT_UPLOAD_MAX_CONCURRENT="''${QDRANT_UPLOAD_MAX_CONCURRENT:-${toString options.maxConcurrent}}"
+            export QDRANT_UPLOAD_ASYNC_CHAT="''${QDRANT_UPLOAD_ASYNC_CHAT:-${if options.asyncChat then "true" else "false"}}"
+
             if [ -z "$1" ]; then
               echo "Usage: qdrant-upload <type> [options]"
               echo ""
@@ -193,19 +218,13 @@
             TYPE="$1"
             shift
 
-            # Add OPENAI_API_KEY to environment if not present
-            if [ -z "$OPENAI_API_KEY" ] && [ -f .env ]; then
+            # Load .env file if present for additional configuration
+            if [ -f .env ]; then
               # Disable shellcheck warning for the .env source
               # shellcheck disable=SC1091
               set -a
               source .env
               set +a
-            fi
-
-            if [ -z "$OPENAI_API_KEY" ]; then
-              echo "Error: OPENAI_API_KEY environment variable is not set"
-              echo "Please set it in your environment or create a .env file"
-              exit 1
             fi
             
             # Check if QDRANT_FOLDERS is set, use that for directories

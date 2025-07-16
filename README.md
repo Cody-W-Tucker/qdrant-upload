@@ -59,12 +59,30 @@ nix develop
 nix run . -- obsidian --collection my_knowledge --dirs ~/Documents/Notes
 ```
 
-### Set Up OpenAI API Key
+### Set Up Ollama
 
-Create a `.env` file in your working directory:
+1. **Install Ollama** (if not already installed):
+   ```bash
+   # On macOS/Linux
+   curl -fsSL https://ollama.ai/install.sh | sh
+   
+   # Or visit https://ollama.ai for other installation methods
+   ```
+
+2. **Pull the embedding model**:
+   ```bash
+   ollama pull nomic-embed-text
+   ```
+
+3. **Start Ollama** (if not running):
+   ```bash
+   ollama serve
+   ```
+
+The default configuration connects to Ollama at `http://localhost:11434`. If your Ollama instance runs elsewhere, create a `.env` file:
 
 ```
-OPENAI_API_KEY=your_openai_api_key_here
+OLLAMA_URL=http://your-ollama-server:11434
 ```
 
 ## Document Types
@@ -76,27 +94,55 @@ qdrant-upload general --dirs /path/to/docs --collection general_docs
 # 2. Obsidian vault
 qdrant-upload obsidian --dirs /path/to/vault --collection obsidian_docs
 
-# 3. Chat history
+# 3. Chat history (with message pairing by default)
 qdrant-upload chat --json-file /path/to/chat_history.json --collection chat_docs
+
+# 3a. Chat history with individual message processing (legacy mode)
+qdrant-upload chat --json-file /path/to/chat_history.json --collection chat_docs --individual-messages
 ```
 
 ## Key Features
 
 -   **Intelligent chunking**: Semantic document splitting preserves context
+-   **Message pairing**: Groups user and AI messages for better chat context (default for chat documents)
 -   **Change tracking**: Avoids reprocessing unchanged documents
 -   **Batch processing**: Efficiently handles large document collections
--   **Custom embedding**: Uses OpenAI's text-embedding-3-large model
+-   **Local embeddings**: Uses Ollama's nomic-embed-text model running locally
+
+## Chat Document Processing
+
+By default, chat documents are processed using **message pairing**, which groups user questions with their corresponding AI responses into single documents. This provides better context for vector search as related conversational exchanges are kept together.
+
+### Message Pairing (Default)
+```bash
+# Groups "User: question" + "Assistant: response" into single documents
+qdrant-upload chat --json-file chat.json --collection chat_history
+```
+
+### Individual Messages (Legacy)
+```bash
+# Processes each message separately (original behavior)
+qdrant-upload chat --json-file chat.json --collection chat_docs --individual-messages
+```
+
+**Benefits of Message Pairing:**
+- Better semantic search results for conversational content
+- Maintains question-answer context
+- Reduces fragmented responses in search results
+- More meaningful embeddings for chat interactions
 
 ## Configuration
 
 ### Environment Variables
 
-| Variable                   | Default                  | Description                    |
-| -------------------------- | ------------------------ | ------------------------------ |
-| `QDRANT_UPLOAD_URL`        | `http://localhost:6333`  | Qdrant server URL              |
-| `QDRANT_UPLOAD_COLLECTION` | `personal`               | Collection name                |
-| `QDRANT_UPLOAD_MODEL`      | `text-embedding-3-large` | Embedding model                |
-| `QDRANT_FOLDERS`           | `[]`                     | Default directories to process |
+| Variable                   | Default                    | Description                    |
+| -------------------------- | -------------------------- | ------------------------------ |
+| `QDRANT_UPLOAD_URL`        | `http://localhost:6333`   | Qdrant server URL              |
+| `QDRANT_UPLOAD_COLLECTION` | `inbox`                   | Collection name                |
+| `QDRANT_UPLOAD_MODEL`      | `nomic-embed-text:latest` | Ollama embedding model         |
+| `QDRANT_UPLOAD_BATCH_SIZE` | `500`                     | Batch size for processing      |
+| `OLLAMA_URL`               | `http://localhost:11434`  | Ollama server URL              |
+| `QDRANT_FOLDERS`           | `[]`                      | Default directories to process |
 
 ### Command Line Options
 
@@ -104,10 +150,14 @@ qdrant-upload chat --json-file /path/to/chat_history.json --collection chat_docs
 qdrant-upload --help
 
 # Common options
-  --collection NAME     Collection name (default: "personal")
-  --source ID           Custom source identifier
-  --skip-existing       Skip documents already in collection
-  --force-update        Update all documents regardless of changes
+  --collection NAME         Collection name (default: "personal")
+  --source ID               Custom source identifier
+  --skip-existing           Skip documents already in collection
+  --force-update            Update all documents regardless of changes
+
+# Chat-specific options
+  --pair-messages           Group user and assistant messages into pairs (default: True)
+  --individual-messages     Process each message individually (overrides --pair-messages)
 ```
 
 ## NixOS Module

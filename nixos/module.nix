@@ -29,13 +29,13 @@ in
 
     embeddingModel = mkOption {
       type = types.str;
-      default = "text-embedding-3-large";
-      description = "OpenAI embedding model to use";
+      default = "nomic-embed-text:latest";
+      description = "Ollama embedding model to use";
     };
 
     vectorDimensions = mkOption {
       type = types.int;
-      default = 3072;
+      default = 768;
       description = "Vector dimensions for the embedding model";
     };
 
@@ -47,7 +47,7 @@ in
 
     batchSize = mkOption {
       type = types.int;
-      default = 100;
+      default = 500;
       description = "Batch size for document uploads";
     };
 
@@ -66,7 +66,7 @@ in
     environmentFile = mkOption {
       type = types.nullOr types.path;
       default = null;
-      description = "Path to environment file containing OPENAI_API_KEY";
+      description = "Path to environment file for additional configuration";
     };
 
     defaultDocumentType = mkOption {

@@ -41,7 +41,6 @@ let
     qdrant-client
     langchain
     langchain-community
-    langchain-openai
     langchain-text-splitters
     unstructured
     # Add our custom packages
@@ -53,12 +52,18 @@ let
   defaultOptions = {
     qdrantUrl = "http://localhost:6333";
     defaultCollection = "personal";
-    embeddingModel = "text-embedding-3-large";
-    vectorDimensions = 3072;
+    embeddingModel = "nomic-embed-text:latest";
+    vectorDimensions = 768;
     distanceMetric = "Cosine";
-    batchSize = 100;
-    minContentLength = 10;
+    batchSize = 2000; # Optimized for RTX 3070 GPU
+    minContentLength = 50;
     obsidianDirectories = [ ];
+    # New async performance settings
+    chunkSize = 2500; # Larger chunks for better chat message completeness
+    chunkOverlap = 200; # Proportional overlap
+    semanticChunker = "false"; # auto=chat only, true=all, false=none (default: false for performance)
+    maxConcurrent = 4; # Optimal for RTX 3070 (8GB VRAM)
+    asyncChat = true; # Enable high-performance async processing
   };
 
 in
@@ -90,6 +95,13 @@ stdenv.mkDerivation {
     export QDRANT_UPLOAD_DISTANCE="${defaultOptions.distanceMetric}"
     export QDRANT_UPLOAD_BATCH_SIZE="${toString defaultOptions.batchSize}"
     export QDRANT_UPLOAD_MIN_LENGTH="${toString defaultOptions.minContentLength}"
+    
+    # New async performance variables (RTX 3070 optimized)
+    export QDRANT_UPLOAD_CHUNK_SIZE="${toString defaultOptions.chunkSize}"
+    export QDRANT_UPLOAD_CHUNK_OVERLAP="${toString defaultOptions.chunkOverlap}"
+    export QDRANT_UPLOAD_SEMANTIC_CHUNKER="${defaultOptions.semanticChunker}"
+    export QDRANT_UPLOAD_MAX_CONCURRENT="${toString defaultOptions.maxConcurrent}"
+    export QDRANT_UPLOAD_ASYNC_CHAT="${if defaultOptions.asyncChat then "true" else "false"}"
 
     if [ -z "\$1" ]; then
       echo "Usage: qdrant-upload <type> [options]"
@@ -106,17 +118,11 @@ stdenv.mkDerivation {
     TYPE="\$1"
     shift
 
-    # Add OPENAI_API_KEY to environment if not present
-    if [ -z "\$OPENAI_API_KEY" ] && [ -f .env ]; then
+    # Load .env file if present for additional configuration
+    if [ -f .env ]; then
       set -a
       source .env
       set +a
-    fi
-
-    if [ -z "\$OPENAI_API_KEY" ]; then
-      echo "Error: OPENAI_API_KEY environment variable is not set"
-      echo "Please set it in your environment or create a .env file"
-      exit 1
     fi
     
     # Run the upload script with the specified type and directories
@@ -127,7 +133,7 @@ stdenv.mkDerivation {
   '';
 
   meta = with lib; {
-    description = "A tool for uploading and indexing documents to a Qdrant vector database with OpenAI embeddings";
+    description = "A tool for uploading and indexing documents to a Qdrant vector database with Ollama embeddings";
     homepage = "https://github.com/Cody-W-Tucker/qdrant-upload";
     license = licenses.mit;
     maintainers = [ "github.com/Cody-W-Tucker" ];

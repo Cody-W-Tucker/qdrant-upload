@@ -1,16 +1,22 @@
 import os
 import argparse
+import asyncio
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from langchain_community.document_loaders import DirectoryLoader, ObsidianLoader, JSONLoader
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
-from langchain_openai.embeddings import OpenAIEmbeddings
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_community.embeddings import OllamaEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, Filter, FieldCondition, MatchValue
 from qdrant_client.http.exceptions import UnexpectedResponse
 import time
 import logging
+from typing import List, Iterator, Dict, Any
+import json
 
 # Configure logging
 logging.basicConfig(
@@ -22,19 +28,24 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    logger.error("OPENAI_API_KEY not found in .env file")
-    raise ValueError("OPENAI_API_KEY not found in .env file")
 
 # Load configurables from environment variables with defaults
-QDRANT_URL = os.getenv("QDRANT_UPLOAD_URL", "http://qdrant.homehub.tv")
+QDRANT_URL = os.getenv("QDRANT_UPLOAD_URL", "http://localhost:6333")
 DEFAULT_COLLECTION = os.getenv("QDRANT_UPLOAD_COLLECTION", "inbox")
-EMBEDDING_MODEL = os.getenv("QDRANT_UPLOAD_MODEL", "text-embedding-3-large")
-VECTOR_DIMENSIONS = int(os.getenv("QDRANT_UPLOAD_DIMENSIONS", "3072"))
+EMBEDDING_MODEL = os.getenv("QDRANT_UPLOAD_MODEL", "nomic-embed-text:latest")
+VECTOR_DIMENSIONS = int(os.getenv("QDRANT_UPLOAD_DIMENSIONS", "768"))
 DISTANCE_METRIC = os.getenv("QDRANT_UPLOAD_DISTANCE", "Cosine")
-BATCH_SIZE = int(os.getenv("QDRANT_UPLOAD_BATCH_SIZE", "100"))
+BATCH_SIZE = int(os.getenv("QDRANT_UPLOAD_BATCH_SIZE", "2000"))  # Optimized for RTX 3070
 MIN_CONTENT_LENGTH = int(os.getenv("QDRANT_UPLOAD_MIN_LENGTH", "50"))
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+# Async processing configuration
+MAX_CONCURRENT_BATCHES = int(os.getenv("QDRANT_UPLOAD_MAX_CONCURRENT", "4"))  # Number of concurrent processing batches
+ENABLE_ASYNC_CHAT = os.getenv("QDRANT_UPLOAD_ASYNC_CHAT", "true").lower() == "true"  # Enable async chat processing
+
+# Performance Notes:
+# - QDRANT_UPLOAD_MAX_CONCURRENT: Controls how many batches process simultaneously (4 is optimal for RTX 3070)
+# - QDRANT_UPLOAD_ASYNC_CHAT: Enables concurrent processing pipeline for 3-5x faster chat uploads
+# - Larger BATCH_SIZE + async processing = maximum GPU utilization and throughput
 
 # Map distance metric string to Qdrant Distance enum
 DISTANCE_MAP = {
@@ -59,7 +70,15 @@ parser.add_argument('--skip-existing', action='store_true',
                    help='Skip documents that already exist in the collection')
 parser.add_argument('--force-update', action='store_true',
                    help='Force update all documents even if unchanged')
+parser.add_argument('--pair-messages', action='store_true', default=True,
+                   help='Group user and assistant messages into pairs for better context (default: True)')
+parser.add_argument('--individual-messages', action='store_true',
+                   help='Process each message individually instead of pairing (overrides --pair-messages)')
 args = parser.parse_args()
+
+# Handle message pairing logic
+if args.individual_messages:
+    args.pair_messages = False
 
 # Use QDRANT_FOLDERS environment variable as default if --dirs not specified
 if args.dirs is None and os.environ.get('QDRANT_FOLDERS'):
@@ -81,13 +100,42 @@ headers_to_split_on = [
 ]
 markdown_header_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on, strip_headers=True)
 
-CHUNK_SIZE = int(os.getenv("QDRANT_UPLOAD_CHUNK_SIZE", "1000"))
-CHUNK_OVERLAP = int(os.getenv("QDRANT_UPLOAD_CHUNK_OVERLAP", "100"))
+CHUNK_SIZE = int(os.getenv("QDRANT_UPLOAD_CHUNK_SIZE", "2500"))  # Increased for better chat message completeness  
+CHUNK_OVERLAP = int(os.getenv("QDRANT_UPLOAD_CHUNK_OVERLAP", "200"))  # Proportional increase
+USE_SEMANTIC_CHUNKER = os.getenv("QDRANT_UPLOAD_SEMANTIC_CHUNKER", "false").lower()  # auto=chat only, true=all, false=none (default: false for performance)
 
 recursive_character_splitter = RecursiveCharacterTextSplitter(
     chunk_size=CHUNK_SIZE,
     chunk_overlap=CHUNK_OVERLAP
 )
+
+# Semantic chunker will be initialized after embeddings are available
+
+# Function to intelligently split documents using either semantic or recursive character splitting
+def split_documents_intelligently(docs, document_type="general"):
+    """
+    Split documents using semantic chunker if enabled, otherwise use recursive character splitter.
+    Auto mode: semantic chunker for chat documents, recursive for others.
+    """
+    should_use_semantic = False
+    
+    if USE_SEMANTIC_CHUNKER == "true":
+        should_use_semantic = True
+    elif USE_SEMANTIC_CHUNKER == "auto":
+        should_use_semantic = (document_type == "chat")
+    elif USE_SEMANTIC_CHUNKER == "false":
+        should_use_semantic = False
+    else:  # Default to auto mode
+        should_use_semantic = (document_type == "chat")
+    
+    if should_use_semantic and semantic_splitter:
+        try:
+            return semantic_splitter.split_documents(docs)
+        except Exception as e:
+            logger.warning(f"Semantic chunker failed, falling back to recursive character splitter: {e}")
+            return recursive_character_splitter.split_documents(docs)
+    else:
+        return recursive_character_splitter.split_documents(docs)
 
 # Function to extract metadata for chat documents
 def extract_chat_metadata(record: dict, metadata: dict) -> dict:
@@ -150,7 +198,7 @@ def collect_general_documents(directories, custom_source=None):
                     h_split_doc.metadata = merged_metadata
                     docs_for_recursive_split.append(h_split_doc)
 
-                final_splits_for_file = recursive_character_splitter.split_documents(docs_for_recursive_split)
+                final_splits_for_file = split_documents_intelligently(docs_for_recursive_split, "general")
                 
                 for i, chunk in enumerate(final_splits_for_file):
                     if not chunk.metadata: chunk.metadata = {}
@@ -213,7 +261,7 @@ def collect_general_documents(directories, custom_source=None):
                     doc.metadata = base_metadata # Update doc's metadata before splitting
                     docs_for_recursive_split_others.append(doc)
 
-                final_splits_for_others = recursive_character_splitter.split_documents(docs_for_recursive_split_others)
+                final_splits_for_others = split_documents_intelligently(docs_for_recursive_split_others, "general")
                 
                 for i, chunk in enumerate(final_splits_for_others):
                     if not chunk.metadata: chunk.metadata = {}
@@ -274,11 +322,72 @@ def collect_obsidian_documents(directories, custom_source=None):
             
     return documents
 
-# Function to load chat documents (modified for streaming)
-def collect_chat_documents(json_file, batch_size_for_chunking=100):
+# Function to create message pairs from chat history
+def create_message_pairs(messages):
+    """
+    Group messages into user-assistant pairs for better context.
+    Returns list of paired messages with combined content, preserving markdown formatting.
+    """
+    pairs = []
+    current_user_msg = None
+    
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")  # Don't strip here to preserve markdown formatting
+        
+        # Skip truly empty messages (but allow whitespace-only content that might be significant)
+        if not content or content.isspace():
+            continue
+            
+        if role == "user":
+            # Save user message, waiting for assistant response
+            current_user_msg = msg
+        elif role == "assistant" and current_user_msg is not None:
+            # Get content preserving markdown formatting
+            user_content = current_user_msg.get('content', '')
+            assistant_content = content
+            
+            # Create pair with markdown-preserved formatting using proper markdown structure
+            pair_content = f"""## User
+
+{user_content}
+
+## Assistant
+
+{assistant_content}"""
+            
+            # Create combined metadata
+            pair_metadata = {
+                "user_id": current_user_msg.get("id", ""),
+                "assistant_id": msg.get("id", ""),
+                "user_timestamp": current_user_msg.get("timestamp", ""),
+                "assistant_timestamp": msg.get("timestamp", ""),
+                "modelName": msg.get("modelName") or msg.get("model", ""),
+                "conversation_pair": True,
+                "pair_id": f"{current_user_msg.get('id', 'unknown')}-{msg.get('id', 'unknown')}",
+                "format": "markdown"  # Indicate that this content contains markdown
+            }
+            
+            if args.source:
+                pair_metadata["source"] = args.source
+            else:
+                pair_metadata["source"] = f"chat_pair_{pair_metadata['pair_id']}"
+            
+            pairs.append({
+                "content": pair_content,
+                "metadata": pair_metadata
+            })
+            
+            # Reset for next pair
+            current_user_msg = None
+    
+    return pairs
+
+# Function to load chat documents with individual message processing (legacy)
+def collect_chat_documents_individual(json_file, batch_size_for_chunking=1000):
     if not os.path.exists(json_file):
         logger.warning(f"Warning: JSON file '{json_file}' does not exist. No documents will be loaded.")
-        return iter([]) # Return an empty iterator
+        return iter([])
     
     try:
         loader = JSONLoader(
@@ -291,12 +400,12 @@ def collect_chat_documents(json_file, batch_size_for_chunking=100):
             metadata_func=extract_chat_metadata
         )
         
-        doc_iterator = loader.lazy_load() # Use lazy_load for an iterator
+        doc_iterator = loader.lazy_load()
         
         batch_for_chunking = []
         raw_docs_processed_count = 0
 
-        logger.info(f"Starting to stream and process documents from {json_file}...")
+        logger.info(f"Starting to stream and process individual messages from {json_file}...")
 
         for doc in doc_iterator:
             batch_for_chunking.append(doc)
@@ -305,7 +414,7 @@ def collect_chat_documents(json_file, batch_size_for_chunking=100):
                 logger.info(f"Collected {current_raw_batch_size} raw messages. Preparing to chunk...")
                 
                 start_chunk_time = time.time()
-                split_docs = recursive_character_splitter.split_documents(batch_for_chunking)
+                split_docs = split_documents_intelligently(batch_for_chunking, "chat")
                 end_chunk_time = time.time()
                 logger.info(f"Finished chunking {current_raw_batch_size} raw messages in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
                 
@@ -318,15 +427,15 @@ def collect_chat_documents(json_file, batch_size_for_chunking=100):
                 if filtered_split_docs:
                     yield filtered_split_docs
                 raw_docs_processed_count += current_raw_batch_size
-                batch_for_chunking = [] # Reset batch
+                batch_for_chunking = []
 
-        # Process any remaining documents in the last batch
+            # Process any remaining documents in the last batch
         if batch_for_chunking:
             current_raw_batch_size = len(batch_for_chunking)
             logger.info(f"Collected final batch of {current_raw_batch_size} raw messages. Preparing to chunk...")
             
             start_chunk_time = time.time()
-            split_docs = recursive_character_splitter.split_documents(batch_for_chunking)
+            split_docs = split_documents_intelligently(batch_for_chunking, "chat")
             end_chunk_time = time.time()
             logger.info(f"Finished chunking final {current_raw_batch_size} raw messages in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
             
@@ -344,7 +453,248 @@ def collect_chat_documents(json_file, batch_size_for_chunking=100):
 
     except Exception as e:
         logger.error(f"Error during streaming chat documents from {json_file}: {e}")
-        return iter([]) # Ensure it still returns an iterable in case of error
+        return iter([])
+
+# Function to load chat documents with message pairing (modified for streaming)
+def collect_chat_documents(json_file, batch_size_for_chunking=1000):
+    # Choose processing method based on user preference
+    if args.pair_messages:
+        return collect_chat_documents_paired(json_file, batch_size_for_chunking)
+    else:
+        return collect_chat_documents_individual(json_file, batch_size_for_chunking)
+
+# Function to load chat documents with message pairing
+def collect_chat_documents_paired(json_file, batch_size_for_chunking=1000):
+    if not os.path.exists(json_file):
+        logger.warning(f"Warning: JSON file '{json_file}' does not exist. No documents will be loaded.")
+        return iter([])
+    
+    try:
+        import json
+        
+        logger.info(f"Loading and pairing chat messages from {json_file}...")
+        
+        # Load the entire JSON file - it's an array of chat records
+        with open(json_file, 'r') as f:
+            data = json.load(f)  # Load as single JSON array
+        
+        # Ensure data is a list
+        if not isinstance(data, list):
+            logger.error(f"Expected JSON array, got {type(data)}")
+            return iter([])
+        
+        batch_for_chunking = []
+        raw_pairs_processed_count = 0
+        total_individual_messages = 0
+        
+        logger.info(f"Processing {len(data)} chat records...")
+        
+        # Process each chat record to extract and pair messages
+        for chat_record in data:
+            messages = []
+            
+            # Extract messages from the correct structure
+            try:
+                if 'chat' in chat_record and 'history' in chat_record['chat'] and 'messages' in chat_record['chat']['history']:
+                    messages_dict = chat_record['chat']['history']['messages']
+                    # Convert dictionary to list of messages
+                    messages = list(messages_dict.values())
+                elif 'chat' in chat_record and 'messages' in chat_record['chat']:
+                    # Fallback for different structure
+                    messages = chat_record['chat']['messages']
+                else:
+                    logger.warning(f"Skipping chat record with unexpected structure")
+                    continue
+                    
+                total_individual_messages += len(messages)
+            except (KeyError, TypeError) as e:
+                logger.warning(f"Skipping chat record with unexpected structure: {e}")
+                continue
+            
+            if not messages:
+                continue
+                
+            # Create message pairs from this conversation
+            message_pairs = create_message_pairs(messages)
+            
+            # Convert pairs to Document-like objects
+            for pair in message_pairs:
+                # Create a document-like object with the paired content
+                from langchain_core.documents import Document
+                
+                doc = Document(
+                    page_content=pair["content"],
+                    metadata=pair["metadata"]
+                )
+                
+                batch_for_chunking.append(doc)
+                
+                # Process in batches
+                if len(batch_for_chunking) >= batch_size_for_chunking:
+                    current_batch_size = len(batch_for_chunking)
+                    logger.info(f"Collected {current_batch_size} message pairs. Preparing to chunk...")
+                    
+                    start_chunk_time = time.time()
+                    split_docs = split_documents_intelligently(batch_for_chunking, "chat")
+                    end_chunk_time = time.time()
+                    logger.info(f"Finished chunking {current_batch_size} message pairs in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
+                    
+                    start_filter_time = time.time()
+                    filtered_split_docs = filter_documents(split_docs)
+                    end_filter_time = time.time()
+                    num_yielded = len(filtered_split_docs) if filtered_split_docs else 0
+                    logger.info(f"Finished filtering in {end_filter_time - start_filter_time:.2f} seconds. Yielding {num_yielded} chunks.")
+
+                    if filtered_split_docs:
+                        yield filtered_split_docs
+                    raw_pairs_processed_count += current_batch_size
+                    batch_for_chunking = []
+        
+        # Process any remaining documents in the last batch
+        if batch_for_chunking:
+            current_batch_size = len(batch_for_chunking)
+            logger.info(f"Collected final batch of {current_batch_size} message pairs. Preparing to chunk...")
+            
+            start_chunk_time = time.time()
+            split_docs = split_documents_intelligently(batch_for_chunking, "chat")
+            end_chunk_time = time.time()
+            logger.info(f"Finished chunking final {current_batch_size} message pairs in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
+            
+            start_filter_time = time.time()
+            filtered_split_docs = filter_documents(split_docs)
+            end_filter_time = time.time()
+            num_yielded = len(filtered_split_docs) if filtered_split_docs else 0
+            logger.info(f"Finished filtering final batch in {end_filter_time - start_filter_time:.2f} seconds. Yielding {num_yielded} chunks.")
+
+            if filtered_split_docs:
+                yield filtered_split_docs
+            raw_pairs_processed_count += current_batch_size
+        
+        logger.info(f"Finished processing chat. Total individual messages: {total_individual_messages}, Total message pairs created: {raw_pairs_processed_count}")
+
+    except Exception as e:
+        logger.error(f"Error during processing chat documents from {json_file}: {e}")
+        return iter([])
+
+# Async function for high-performance chat document processing
+async def process_chat_documents_async(json_file: str, vector_store, batch_size_for_chunking: int = 1000):
+    """
+    High-performance async processing of chat documents with concurrent batch processing.
+    """
+    if not os.path.exists(json_file):
+        logger.warning(f"Warning: JSON file '{json_file}' does not exist.")
+        return 0
+    
+    try:
+        logger.info(f"Starting async chat processing from: {json_file}")
+        start_total_time = time.time()
+        
+        # Load JSON data
+        with open(json_file, 'r') as f:
+            data = json.load(f)
+        
+        if not isinstance(data, list):
+            logger.error(f"Expected JSON array, got {type(data)}")
+            return 0
+        
+        logger.info(f"Loaded {len(data)} chat records for async processing")
+        
+        # Process chat records and create document batches
+        all_batches = []
+        current_batch = []
+        total_individual_messages = 0
+        
+        for chat_record in data:
+            try:
+                messages = []
+                if 'chat' in chat_record and 'history' in chat_record['chat'] and 'messages' in chat_record['chat']['history']:
+                    messages_dict = chat_record['chat']['history']['messages']
+                    messages = list(messages_dict.values())
+                elif 'chat' in chat_record and 'messages' in chat_record['chat']:
+                    messages = chat_record['chat']['messages']
+                else:
+                    continue
+                    
+                total_individual_messages += len(messages)
+                
+                if not messages:
+                    continue
+                
+                # Create message pairs or individual messages based on settings
+                if args.pair_messages:
+                    message_pairs = create_message_pairs(messages)
+                    for pair in message_pairs:
+                        from langchain_core.documents import Document
+                        doc = Document(page_content=pair["content"], metadata=pair["metadata"])
+                        current_batch.append(doc)
+                        
+                        if len(current_batch) >= batch_size_for_chunking:
+                            all_batches.append(current_batch)
+                            current_batch = []
+                else:
+                    # Individual message processing (implement if needed)
+                    pass
+                    
+            except Exception as e:
+                logger.warning(f"Skipping chat record: {e}")
+                continue
+        
+        # Add final batch
+        if current_batch:
+            all_batches.append(current_batch)
+        
+        logger.info(f"Created {len(all_batches)} batches from {total_individual_messages} individual messages")
+        
+        if not all_batches:
+            logger.warning("No chat batches to process")
+            return 0
+        
+        # Process batches concurrently with controlled concurrency
+        total_uploaded = 0
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
+        
+        async def process_and_upload_batch(batch_docs, batch_id):
+            async with semaphore:
+                # Process documents
+                processed_docs = await process_document_batch_async(batch_docs, "chat", batch_id)
+                if processed_docs:
+                    # Upload documents
+                    success = await upload_documents_async(vector_store, processed_docs, batch_id)
+                    return len(processed_docs) if success else 0
+                return 0
+        
+        # Create tasks for all batches
+        tasks = [
+            process_and_upload_batch(batch, i + 1) 
+            for i, batch in enumerate(all_batches)
+        ]
+        
+        # Execute all tasks concurrently
+        logger.info(f"Starting concurrent processing of {len(tasks)} batches (max {MAX_CONCURRENT_BATCHES} concurrent)")
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Count successful uploads
+        for result in results:
+            if isinstance(result, int):
+                total_uploaded += result
+            elif isinstance(result, Exception):
+                logger.error(f"Batch processing failed: {result}")
+        
+        end_total_time = time.time()
+        processing_time = end_total_time - start_total_time
+        
+        logger.info(f"\n🚀 Async chat processing complete:")
+        logger.info(f"  - Total batches processed: {len(all_batches)}")
+        logger.info(f"  - Total chunks uploaded: {total_uploaded}")
+        logger.info(f"  - Total processing time: {processing_time:.2f}s")
+        logger.info(f"  - Average time per batch: {processing_time/len(all_batches):.2f}s")
+        logger.info(f"  - Processing rate: {total_uploaded/processing_time:.1f} chunks/second")
+        
+        return total_uploaded
+        
+    except Exception as e:
+        logger.error(f"Error in async chat processing: {e}")
+        return 0
 
 # Function to filter out empty or very short documents
 def filter_documents(docs, min_word_count=MIN_CONTENT_LENGTH):
@@ -367,9 +717,96 @@ def filter_documents(docs, min_word_count=MIN_CONTENT_LENGTH):
     
     return filtered_docs
 
+# Async function to process a batch of documents
+async def process_document_batch_async(batch_docs: List, document_type: str = "chat", batch_id: int = 0) -> List:
+    """
+    Asynchronously process a batch of documents: split, filter, and prepare for upload.
+    """
+    try:
+        start_time = time.time()
+        
+        # Run document splitting in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            split_docs = await loop.run_in_executor(
+                executor, 
+                split_documents_intelligently, 
+                batch_docs, 
+                document_type
+            )
+            
+            # Filter documents in parallel
+            filtered_docs = await loop.run_in_executor(
+                executor,
+                filter_documents,
+                split_docs
+            )
+        
+        end_time = time.time()
+        logger.info(f"Batch {batch_id}: Processed {len(batch_docs)} docs → {len(split_docs)} chunks → {len(filtered_docs)} filtered chunks in {end_time - start_time:.2f}s")
+        
+        return filtered_docs
+        
+    except Exception as e:
+        logger.error(f"Error processing batch {batch_id}: {e}")
+        return []
+
+# Async function to upload documents to Qdrant
+async def upload_documents_async(vector_store, docs: List, batch_id: int = 0) -> bool:
+    """
+    Asynchronously upload documents to Qdrant vector store.
+    """
+    try:
+        start_time = time.time()
+        
+        # Run the upload in a thread pool since vector_store.add_documents is synchronous
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            await loop.run_in_executor(
+                executor,
+                vector_store.add_documents,
+                docs
+            )
+        
+        end_time = time.time()
+        logger.info(f"Batch {batch_id}: Successfully uploaded {len(docs)} chunks in {end_time - start_time:.2f}s")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error uploading batch {batch_id}: {e}")
+        return False
+
 
 # Initialize embeddings
-embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)
+try:
+    embeddings = OllamaEmbeddings(
+        model=EMBEDDING_MODEL,
+        base_url=OLLAMA_URL
+    )
+    logger.info(f"Initialized Ollama embeddings with model: {EMBEDDING_MODEL}")
+    # Test the connection
+    test_embedding = embeddings.embed_query("test")
+    logger.info(f"Successfully connected to Ollama. Embedding dimension: {len(test_embedding)}")
+    
+    # Initialize semantic chunker based on configuration
+    if USE_SEMANTIC_CHUNKER == "true":
+        semantic_splitter = SemanticChunker(embeddings=embeddings)
+        logger.info("Semantic chunker enabled for all document types")
+    elif USE_SEMANTIC_CHUNKER == "auto":
+        semantic_splitter = SemanticChunker(embeddings=embeddings)
+        logger.info("Semantic chunker initialized - will auto-enable for chat documents")
+    elif USE_SEMANTIC_CHUNKER == "false":
+        semantic_splitter = None
+        logger.info("Semantic chunker disabled for all document types")
+    else:
+        semantic_splitter = SemanticChunker(embeddings=embeddings)
+        logger.info("Semantic chunker initialized - defaulting to auto mode")
+        
+except Exception as e:
+    logger.error(f"Failed to initialize Ollama embeddings. Make sure Ollama is running and {EMBEDDING_MODEL} is available.")
+    logger.error(f"Error: {e}")
+    logger.error(f"You can install the model with: ollama pull {EMBEDDING_MODEL.split(':')[0]}")
+    exit(1)
 
 # Set up Qdrant client and collection
 logger.info(f"Connecting to Qdrant at {QDRANT_URL}...")
@@ -617,7 +1054,7 @@ elif args.type == 'obsidian':
                 h_split.metadata = merged_meta
                 current_file_chunks_for_recursive_split.append(h_split)
                 
-            final_chunks_for_file = recursive_character_splitter.split_documents(current_file_chunks_for_recursive_split)
+            final_chunks_for_file = split_documents_intelligently(current_file_chunks_for_recursive_split, "obsidian")
             
             for i, chunk in enumerate(final_chunks_for_file):
                 if not chunk.metadata: chunk.metadata = {} # Should be populated
@@ -645,38 +1082,59 @@ elif args.type == 'obsidian':
     logger.info(f"Successfully processed Obsidian documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
 
 elif args.type == 'chat':
-    logger.info(f"Processing chat documents from: {args.json_file} (streaming)")
-    # collect_chat_documents is now a generator yielding batches of *already filtered and split* docs
-    doc_batch_generator = collect_chat_documents(args.json_file, batch_size_for_chunking=100) # Internal batch size for chunking
+    mode = "message pairing" if args.pair_messages else "individual messages"
     
-    total_chunks_uploaded_chat = 0
-    batch_num = 0
-    any_docs_processed = False
-
-    for doc_batch in doc_batch_generator: # doc_batch is a list of filtered, split documents
-        if not doc_batch: # Should not happen if filter_documents works correctly with yield
-            continue
-
-        any_docs_processed = True
-        batch_num += 1
-        num_docs_in_batch = len(doc_batch)
-        total_chunks_uploaded_chat += num_docs_in_batch
+    if ENABLE_ASYNC_CHAT:
+        logger.info(f"🚀 Using high-performance async processing for chat documents from: {args.json_file}")
+        logger.info(f"  - Mode: {mode}")
+        logger.info(f"  - Max concurrent batches: {MAX_CONCURRENT_BATCHES}")
+        logger.info(f"  - GPU-optimized batch size: {BATCH_SIZE}")
         
-        logger.info(f"Uploading chat document batch {batch_num} with {num_docs_in_batch} chunks to collection '{args.collection}'...")
-        # Qdrant's add_documents can handle a list of documents directly for batching.
-        # The BATCH_SIZE constant is for Qdrant client library internal batching, not what we do here.
-        # However, the vector_store.add_documents method uses its own batching if the list is large.
-        # We are essentially feeding it pre-batched chunks from our generator.
-        vector_store.add_documents(doc_batch) # This will further batch if doc_batch is > BATCH_SIZE
-        logger.info(f"Uploaded chat batch {batch_num} ({num_docs_in_batch} chunks).")
+        # Use async processing for much faster performance
+        async def run_async_chat_processing():
+            return await process_chat_documents_async(args.json_file, vector_store, batch_size_for_chunking=1000)
+        
+        total_chunks_uploaded_chat = asyncio.run(run_async_chat_processing())
+        
+        if total_chunks_uploaded_chat == 0:
+            logger.warning("No chat documents were processed. Exiting.")
+            exit(0)
+        
+        logger.info(f"✅ High-performance async chat processing completed successfully!")
+        logger.info(f"Successfully processed {total_chunks_uploaded_chat} chunks to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
+        
+    else:
+        # Fall back to legacy synchronous processing
+        logger.info(f"Processing chat documents from: {args.json_file} (legacy synchronous mode with {mode})")
+        logger.info("💡 Tip: Set QDRANT_UPLOAD_ASYNC_CHAT=true for much faster processing!")
+        
+        doc_batch_generator = collect_chat_documents(args.json_file, batch_size_for_chunking=1000)
+        
+        total_chunks_uploaded_chat = 0
+        batch_num = 0
+        any_docs_processed = False
 
-    if not any_docs_processed:
-        logger.warning("No chat documents were processed or yielded from the generator. Exiting.")
-        exit(0)
+        for doc_batch in doc_batch_generator:
+            if not doc_batch:
+                continue
 
-    logger.info(f"\nChat document streaming and upload complete:")
-    logger.info(f"  - Total chunks uploaded: {total_chunks_uploaded_chat}")
-    logger.info(f"Successfully processed chat documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
+            any_docs_processed = True
+            batch_num += 1
+            num_docs_in_batch = len(doc_batch)
+            total_chunks_uploaded_chat += num_docs_in_batch
+            
+            logger.info(f"Uploading chat document batch {batch_num} with {num_docs_in_batch} chunks to collection '{args.collection}'...")
+            vector_store.add_documents(doc_batch)
+            logger.info(f"Uploaded chat batch {batch_num} ({num_docs_in_batch} chunks).")
+
+        if not any_docs_processed:
+            logger.warning("No chat documents were processed or yielded from the generator. Exiting.")
+            exit(0)
+
+        logger.info(f"\nChat document streaming and upload complete:")
+        logger.info(f"  - Processing mode: {mode}")
+        logger.info(f"  - Total chunks uploaded: {total_chunks_uploaded_chat}")
+        logger.info(f"Successfully processed chat documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
 
 else:
     logger.error(f"Error: Unknown document type specified: {args.type}")
