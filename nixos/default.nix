@@ -83,7 +83,7 @@ stdenv.mkDerivation {
     mkdir -p $out/share/qdrant-upload
 
     # Copy main Python script
-    cp ${./upload.py} $out/share/qdrant-upload/upload.py
+    cp ${../upload.py} $out/share/qdrant-upload/upload.py
 
     # Create wrapper script
     cat > $out/bin/qdrant-upload << EOF
