@@ -17,6 +17,7 @@ import time
 import logging
 from typing import List, Iterator, Dict, Any
 import json
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -38,6 +39,7 @@ DISTANCE_METRIC = os.getenv("QDRANT_UPLOAD_DISTANCE", "Cosine")
 BATCH_SIZE = int(os.getenv("QDRANT_UPLOAD_BATCH_SIZE", "2000"))  # Optimized for RTX 3070
 MIN_CONTENT_LENGTH = int(os.getenv("QDRANT_UPLOAD_MIN_LENGTH", "50"))
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+
 # Async processing configuration
 MAX_CONCURRENT_BATCHES = int(os.getenv("QDRANT_UPLOAD_MAX_CONCURRENT", "4"))  # Number of concurrent processing batches
 ENABLE_ASYNC_CHAT = os.getenv("QDRANT_UPLOAD_ASYNC_CHAT", "true").lower() == "true"  # Enable async chat processing
@@ -63,22 +65,14 @@ parser.add_argument('--source', type=str,
 parser.add_argument('--type', type=str, required=True, choices=['general', 'obsidian', 'chat'],
                    help='Type of documents to process: general, obsidian, or chat')
 parser.add_argument('--dirs', type=str, nargs='+',
-                   help='Directories to process (multiple directories can be specified)')
+                   help='Directories to process (for general and obsidian types)')
 parser.add_argument('--json-file', type=str, 
-                   help='Path to JSON file (for chat type only)')
+                   help='Path to JSON file (required for chat type)')
 parser.add_argument('--skip-existing', action='store_true',
                    help='Skip documents that already exist in the collection')
 parser.add_argument('--force-update', action='store_true',
                    help='Force update all documents even if unchanged')
-parser.add_argument('--pair-messages', action='store_true', default=True,
-                   help='Group user and assistant messages into pairs for better context (default: True)')
-parser.add_argument('--individual-messages', action='store_true',
-                   help='Process each message individually instead of pairing (overrides --pair-messages)')
 args = parser.parse_args()
-
-# Handle message pairing logic
-if args.individual_messages:
-    args.pair_messages = False
 
 # Use QDRANT_FOLDERS environment variable as default if --dirs not specified
 if args.dirs is None and os.environ.get('QDRANT_FOLDERS'):
@@ -111,11 +105,288 @@ recursive_character_splitter = RecursiveCharacterTextSplitter(
 
 # Semantic chunker will be initialized after embeddings are available
 
-# Function to intelligently split documents using either semantic or recursive character splitting
+def create_code_aware_splitter():
+    """
+    Create a text splitter that preserves code blocks (triple backticks) intact.
+    """
+    def split_text_preserve_code(text: str, chunk_size: int = CHUNK_SIZE, chunk_overlap: int = CHUNK_OVERLAP):
+        # Find all code blocks
+        code_block_pattern = r'```[\s\S]*?```'
+        code_blocks = []
+        
+        # Replace code blocks with placeholders and store them
+        def replace_code_block(match):
+            code_blocks.append(match.group())
+            return f"__CODE_BLOCK_{len(code_blocks)-1}__"
+        
+        text_with_placeholders = re.sub(code_block_pattern, replace_code_block, text)
+        
+        # Split the text normally
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap
+        )
+        chunks = splitter.split_text(text_with_placeholders)
+        
+        # Restore code blocks in each chunk
+        final_chunks = []
+        for chunk in chunks:
+            # Replace placeholders back with actual code blocks
+            for i, code_block in enumerate(code_blocks):
+                chunk = chunk.replace(f"__CODE_BLOCK_{i}__", code_block)
+            final_chunks.append(chunk)
+        
+        return final_chunks
+    
+    return split_text_preserve_code
+
+def collect_chat_conversations(json_file):
+    """
+    Simplified chat processing: Extract entire conversation text and split with code block preservation.
+    
+    Process Open-WebUI chat exports:
+    1. Parse each conversation 
+    2. Concatenate all messages into single text blob preserving formatting
+    3. Split using code-aware splitter 
+    4. Add conversation metadata to all chunks
+    """
+    if not os.path.exists(json_file):
+        logger.warning(f"Warning: JSON file '{json_file}' does not exist.")
+        return []
+    
+    try:
+        import json
+        logger.info(f"Loading chat conversations from {json_file}...")
+        
+        # Load the JSON file 
+        with open(json_file, 'r') as f:
+            data = json.load(f)
+        
+        if not isinstance(data, list):
+            logger.error(f"Expected JSON array, got {type(data)}")
+            return []
+        
+        documents = []
+        code_aware_splitter = create_code_aware_splitter()
+        
+        logger.info(f"Processing {len(data)} chat conversations...")
+        
+        for chat_record in data:
+            try:
+                # Extract conversation metadata
+                chat_id = chat_record.get('id', 'unknown')
+                chat_title = chat_record.get('title', '')
+                created_at = chat_record.get('created_at')
+                updated_at = chat_record.get('updated_at')
+                
+                # Extract messages from Open-WebUI structure
+                messages = []
+                if 'chat' in chat_record and 'history' in chat_record['chat'] and 'messages' in chat_record['chat']['history']:
+                    messages_dict = chat_record['chat']['history']['messages']
+                    messages = list(messages_dict.values())
+                elif 'chat' in chat_record and 'messages' in chat_record['chat']:
+                    messages = chat_record['chat']['messages']
+                else:
+                    logger.warning(f"Skipping chat record {chat_id} - unexpected structure")
+                    continue
+                
+                if not messages:
+                    continue
+                
+                # Build the complete conversation text
+                conversation_parts = []
+                message_count = 0
+                earliest_timestamp = None
+                latest_timestamp = None
+                models_used = set()
+                
+                for msg in messages:
+                    role = msg.get('role', '')
+                    content = msg.get('content', '').strip()
+                    timestamp = msg.get('timestamp')
+                    model = msg.get('model') or msg.get('modelName', '')
+                    
+                    if not content:
+                        continue
+                    
+                    message_count += 1
+                    
+                    # Track timestamps  
+                    if timestamp:
+                        if earliest_timestamp is None or timestamp < earliest_timestamp:
+                            earliest_timestamp = timestamp
+                        if latest_timestamp is None or timestamp > latest_timestamp:
+                            latest_timestamp = timestamp
+                    
+                    # Track models used
+                    if model:
+                        models_used.add(model)
+                    
+                    # Format message with role header and preserve all formatting
+                    role_display = "User" if role == "user" else f"Assistant ({model})" if model else "Assistant"
+                    conversation_parts.append(f"**{role_display}:**\n{content}")
+                
+                if not conversation_parts:
+                    continue
+                
+                # Create the complete conversation text
+                conversation_text = "\n\n---\n\n".join(conversation_parts)
+                
+                # Add conversation header with metadata
+                header_parts = []
+                if chat_title:
+                    header_parts.append(f"# {chat_title}")
+                header_parts.append(f"*Conversation ID: {chat_id}*")
+                if created_at:
+                    header_parts.append(f"*Created: {created_at}*")
+                if models_used:
+                    header_parts.append(f"*Models: {', '.join(sorted(models_used))}*")
+                header_parts.append(f"*Messages: {message_count}*")
+                
+                conversation_header = "\n".join(header_parts)
+                full_conversation = f"{conversation_header}\n\n{conversation_text}"
+                
+                # Split the conversation using code-aware splitter
+                chunks = code_aware_splitter(full_conversation)
+                
+                # Create documents for each chunk with conversation metadata
+                for i, chunk in enumerate(chunks):
+                    if len(chunk.strip()) < MIN_CONTENT_LENGTH:
+                        continue
+                    
+                    # Create metadata for this chunk
+                    chunk_metadata = {
+                        'conversation_id': chat_id,
+                        'conversation_title': chat_title,
+                        'chunk_index': i,
+                        'total_chunks': len(chunks),
+                        'message_count': message_count,
+                        'models_used': list(models_used),
+                        'content_type': 'chat_conversation'
+                    }
+                    
+                    # Add timestamps if available
+                    if created_at:
+                        chunk_metadata['created_at'] = created_at
+                    if updated_at:
+                        chunk_metadata['updated_at'] = updated_at  
+                    if earliest_timestamp:
+                        chunk_metadata['earliest_message'] = earliest_timestamp
+                    if latest_timestamp:
+                        chunk_metadata['latest_message'] = latest_timestamp
+                    
+                    # Add source
+                    if args.source:
+                        chunk_metadata['source'] = args.source
+                    else:
+                        chunk_metadata['source'] = f"chat_{chat_id}_chunk_{i}"
+                    
+                    # Create document
+                    from langchain_core.documents import Document
+                    doc = Document(page_content=chunk, metadata=chunk_metadata)
+                    documents.append(doc)
+                    
+                logger.info(f"Processed conversation {chat_id}: {message_count} messages -> {len(chunks)} chunks")
+                
+            except Exception as e:
+                logger.warning(f"Error processing chat record: {e}")
+                continue
+        
+        logger.info(f"Successfully processed {len(documents)} conversation chunks from {json_file}")
+        return documents
+        
+    except Exception as e:
+        logger.error(f"Error loading chat conversations from {json_file}: {e}")
+        return []
+
+# Async function for high-performance chat document processing with new simplified approach
+async def process_chat_conversations_async(json_file: str, vector_store, batch_size_for_processing: int = 1000):
+    """
+    High-performance async processing of chat conversations using the new simplified approach.
+    """
+    if not os.path.exists(json_file):
+        logger.warning(f"Warning: JSON file '{json_file}' does not exist.")
+        return 0
+    
+    try:
+        logger.info(f"🚀 Starting async chat conversation processing from: {json_file}")
+        start_total_time = time.time()
+        
+        # Load conversations using our simplified function
+        docs = collect_chat_conversations(json_file)
+        
+        if not docs:
+            logger.warning("No chat conversations found to process.")
+            return 0
+        
+        # Filter documents
+        docs = filter_documents(docs)
+        
+        if not docs:
+            logger.warning("No chat documents remaining after filtering.")
+            return 0
+        
+        logger.info(f"Loaded {len(docs)} conversation chunks for async processing")
+        
+        # Create batches for concurrent processing
+        all_batches = []
+        for i in range(0, len(docs), batch_size_for_processing):
+            batch = docs[i:i+batch_size_for_processing]
+            all_batches.append(batch)
+        
+        logger.info(f"Created {len(all_batches)} batches for concurrent processing")
+        
+        if not all_batches:
+            logger.warning("No chat batches to process")
+            return 0
+        
+        # Process batches concurrently with controlled concurrency
+        total_uploaded = 0
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
+        
+        async def upload_batch_async(batch_docs, batch_id):
+            async with semaphore:
+                # Upload documents directly since they're already processed
+                success = await upload_documents_async(vector_store, batch_docs, batch_id)
+                return len(batch_docs) if success else 0
+        
+        # Create tasks for all batches
+        tasks = [
+            upload_batch_async(batch, i + 1) 
+            for i, batch in enumerate(all_batches)
+        ]
+        
+        # Execute all tasks concurrently
+        logger.info(f"Starting concurrent upload of {len(tasks)} batches (max {MAX_CONCURRENT_BATCHES} concurrent)")
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Count successful uploads
+        for result in results:
+            if isinstance(result, int):
+                total_uploaded += result
+            elif isinstance(result, Exception):
+                logger.error(f"Batch upload failed: {result}")
+        
+        end_total_time = time.time()
+        processing_time = end_total_time - start_total_time
+        
+        logger.info(f"\n🚀 Async chat conversation processing complete:")
+        logger.info(f"  - Total batches processed: {len(all_batches)}")
+        logger.info(f"  - Total chunks uploaded: {total_uploaded}")
+        logger.info(f"  - Total processing time: {processing_time:.2f}s")
+        logger.info(f"  - Average time per batch: {processing_time/len(all_batches):.2f}s")
+        logger.info(f"  - Processing rate: {total_uploaded/processing_time:.1f} chunks/second")
+        
+        return total_uploaded
+        
+    except Exception as e:
+        logger.error(f"Error in async chat conversation processing: {e}")
+        return 0
+
 def split_documents_intelligently(docs, document_type="general"):
     """
-    Split documents using semantic chunker if enabled, otherwise use recursive character splitter.
-    Auto mode: semantic chunker for chat documents, recursive for others.
+    Split documents using semantic chunker for chat, recursive for others.
+    Simplified approach without complex code-aware splitting.
     """
     should_use_semantic = False
     
@@ -130,25 +401,13 @@ def split_documents_intelligently(docs, document_type="general"):
     
     if should_use_semantic and semantic_splitter:
         try:
+            logger.info(f"Using semantic chunker for {len(docs)} {document_type} documents")
             return semantic_splitter.split_documents(docs)
         except Exception as e:
             logger.warning(f"Semantic chunker failed, falling back to recursive character splitter: {e}")
             return recursive_character_splitter.split_documents(docs)
     else:
         return recursive_character_splitter.split_documents(docs)
-
-# Function to extract metadata for chat documents
-def extract_chat_metadata(record: dict, metadata: dict) -> dict:
-    metadata["id"] = record.get("id", "")
-    metadata["parentId"] = record.get("parentId", "")
-    metadata["role"] = record.get("role", "")
-    metadata["modelName"] = record.get("modelName") or record.get("model", "")
-    metadata["timestamp"] = record.get("timestamp", "")
-    if args.source:
-        metadata["source"] = args.source
-    else:
-        metadata["source"] = f"chat_{record.get('id', 'unknown')}"
-    return metadata
 
 # Function to load general documents from multiple directories
 def collect_general_documents(directories, custom_source=None):
@@ -322,380 +581,6 @@ def collect_obsidian_documents(directories, custom_source=None):
             
     return documents
 
-# Function to create message pairs from chat history
-def create_message_pairs(messages):
-    """
-    Group messages into user-assistant pairs for better context.
-    Returns list of paired messages with combined content, preserving markdown formatting.
-    """
-    pairs = []
-    current_user_msg = None
-    
-    for msg in messages:
-        role = msg.get("role", "")
-        content = msg.get("content", "")  # Don't strip here to preserve markdown formatting
-        
-        # Skip truly empty messages (but allow whitespace-only content that might be significant)
-        if not content or content.isspace():
-            continue
-            
-        if role == "user":
-            # Save user message, waiting for assistant response
-            current_user_msg = msg
-        elif role == "assistant" and current_user_msg is not None:
-            # Get content preserving markdown formatting
-            user_content = current_user_msg.get('content', '')
-            assistant_content = content
-            
-            # Create pair with markdown-preserved formatting using proper markdown structure
-            pair_content = f"""## User
-
-{user_content}
-
-## Assistant
-
-{assistant_content}"""
-            
-            # Create combined metadata
-            pair_metadata = {
-                "user_id": current_user_msg.get("id", ""),
-                "assistant_id": msg.get("id", ""),
-                "user_timestamp": current_user_msg.get("timestamp", ""),
-                "assistant_timestamp": msg.get("timestamp", ""),
-                "modelName": msg.get("modelName") or msg.get("model", ""),
-                "conversation_pair": True,
-                "pair_id": f"{current_user_msg.get('id', 'unknown')}-{msg.get('id', 'unknown')}",
-                "format": "markdown"  # Indicate that this content contains markdown
-            }
-            
-            if args.source:
-                pair_metadata["source"] = args.source
-            else:
-                pair_metadata["source"] = f"chat_pair_{pair_metadata['pair_id']}"
-            
-            pairs.append({
-                "content": pair_content,
-                "metadata": pair_metadata
-            })
-            
-            # Reset for next pair
-            current_user_msg = None
-    
-    return pairs
-
-# Function to load chat documents with individual message processing (legacy)
-def collect_chat_documents_individual(json_file, batch_size_for_chunking=1000):
-    if not os.path.exists(json_file):
-        logger.warning(f"Warning: JSON file '{json_file}' does not exist. No documents will be loaded.")
-        return iter([])
-    
-    try:
-        loader = JSONLoader(
-            file_path=json_file,
-            text_content=False,
-            json_lines=True,
-            is_content_key_jq_parsable=True,
-            content_key='.content',
-            jq_schema='.[].chat.messages[]',
-            metadata_func=extract_chat_metadata
-        )
-        
-        doc_iterator = loader.lazy_load()
-        
-        batch_for_chunking = []
-        raw_docs_processed_count = 0
-
-        logger.info(f"Starting to stream and process individual messages from {json_file}...")
-
-        for doc in doc_iterator:
-            batch_for_chunking.append(doc)
-            if len(batch_for_chunking) >= batch_size_for_chunking:
-                current_raw_batch_size = len(batch_for_chunking)
-                logger.info(f"Collected {current_raw_batch_size} raw messages. Preparing to chunk...")
-                
-                start_chunk_time = time.time()
-                split_docs = split_documents_intelligently(batch_for_chunking, "chat")
-                end_chunk_time = time.time()
-                logger.info(f"Finished chunking {current_raw_batch_size} raw messages in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
-                
-                start_filter_time = time.time()
-                filtered_split_docs = filter_documents(split_docs)
-                end_filter_time = time.time()
-                num_yielded = len(filtered_split_docs) if filtered_split_docs else 0
-                logger.info(f"Finished filtering in {end_filter_time - start_filter_time:.2f} seconds. Yielding {num_yielded} chunks.")
-
-                if filtered_split_docs:
-                    yield filtered_split_docs
-                raw_docs_processed_count += current_raw_batch_size
-                batch_for_chunking = []
-
-            # Process any remaining documents in the last batch
-        if batch_for_chunking:
-            current_raw_batch_size = len(batch_for_chunking)
-            logger.info(f"Collected final batch of {current_raw_batch_size} raw messages. Preparing to chunk...")
-            
-            start_chunk_time = time.time()
-            split_docs = split_documents_intelligently(batch_for_chunking, "chat")
-            end_chunk_time = time.time()
-            logger.info(f"Finished chunking final {current_raw_batch_size} raw messages in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
-            
-            start_filter_time = time.time()
-            filtered_split_docs = filter_documents(split_docs)
-            end_filter_time = time.time()
-            num_yielded = len(filtered_split_docs) if filtered_split_docs else 0
-            logger.info(f"Finished filtering final batch in {end_filter_time - start_filter_time:.2f} seconds. Yielding {num_yielded} chunks.")
-
-            if filtered_split_docs:
-                yield filtered_split_docs
-            raw_docs_processed_count += current_raw_batch_size
-
-        logger.info(f"Finished streaming and processing. Total raw chat messages processed from {json_file}: {raw_docs_processed_count}")
-
-    except Exception as e:
-        logger.error(f"Error during streaming chat documents from {json_file}: {e}")
-        return iter([])
-
-# Function to load chat documents with message pairing (modified for streaming)
-def collect_chat_documents(json_file, batch_size_for_chunking=1000):
-    # Choose processing method based on user preference
-    if args.pair_messages:
-        return collect_chat_documents_paired(json_file, batch_size_for_chunking)
-    else:
-        return collect_chat_documents_individual(json_file, batch_size_for_chunking)
-
-# Function to load chat documents with message pairing
-def collect_chat_documents_paired(json_file, batch_size_for_chunking=1000):
-    if not os.path.exists(json_file):
-        logger.warning(f"Warning: JSON file '{json_file}' does not exist. No documents will be loaded.")
-        return iter([])
-    
-    try:
-        import json
-        
-        logger.info(f"Loading and pairing chat messages from {json_file}...")
-        
-        # Load the entire JSON file - it's an array of chat records
-        with open(json_file, 'r') as f:
-            data = json.load(f)  # Load as single JSON array
-        
-        # Ensure data is a list
-        if not isinstance(data, list):
-            logger.error(f"Expected JSON array, got {type(data)}")
-            return iter([])
-        
-        batch_for_chunking = []
-        raw_pairs_processed_count = 0
-        total_individual_messages = 0
-        
-        logger.info(f"Processing {len(data)} chat records...")
-        
-        # Process each chat record to extract and pair messages
-        for chat_record in data:
-            messages = []
-            
-            # Extract messages from the correct structure
-            try:
-                if 'chat' in chat_record and 'history' in chat_record['chat'] and 'messages' in chat_record['chat']['history']:
-                    messages_dict = chat_record['chat']['history']['messages']
-                    # Convert dictionary to list of messages
-                    messages = list(messages_dict.values())
-                elif 'chat' in chat_record and 'messages' in chat_record['chat']:
-                    # Fallback for different structure
-                    messages = chat_record['chat']['messages']
-                else:
-                    logger.warning(f"Skipping chat record with unexpected structure")
-                    continue
-                    
-                total_individual_messages += len(messages)
-            except (KeyError, TypeError) as e:
-                logger.warning(f"Skipping chat record with unexpected structure: {e}")
-                continue
-            
-            if not messages:
-                continue
-                
-            # Create message pairs from this conversation
-            message_pairs = create_message_pairs(messages)
-            
-            # Convert pairs to Document-like objects
-            for pair in message_pairs:
-                # Create a document-like object with the paired content
-                from langchain_core.documents import Document
-                
-                doc = Document(
-                    page_content=pair["content"],
-                    metadata=pair["metadata"]
-                )
-                
-                batch_for_chunking.append(doc)
-                
-                # Process in batches
-                if len(batch_for_chunking) >= batch_size_for_chunking:
-                    current_batch_size = len(batch_for_chunking)
-                    logger.info(f"Collected {current_batch_size} message pairs. Preparing to chunk...")
-                    
-                    start_chunk_time = time.time()
-                    split_docs = split_documents_intelligently(batch_for_chunking, "chat")
-                    end_chunk_time = time.time()
-                    logger.info(f"Finished chunking {current_batch_size} message pairs in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
-                    
-                    start_filter_time = time.time()
-                    filtered_split_docs = filter_documents(split_docs)
-                    end_filter_time = time.time()
-                    num_yielded = len(filtered_split_docs) if filtered_split_docs else 0
-                    logger.info(f"Finished filtering in {end_filter_time - start_filter_time:.2f} seconds. Yielding {num_yielded} chunks.")
-
-                    if filtered_split_docs:
-                        yield filtered_split_docs
-                    raw_pairs_processed_count += current_batch_size
-                    batch_for_chunking = []
-        
-        # Process any remaining documents in the last batch
-        if batch_for_chunking:
-            current_batch_size = len(batch_for_chunking)
-            logger.info(f"Collected final batch of {current_batch_size} message pairs. Preparing to chunk...")
-            
-            start_chunk_time = time.time()
-            split_docs = split_documents_intelligently(batch_for_chunking, "chat")
-            end_chunk_time = time.time()
-            logger.info(f"Finished chunking final {current_batch_size} message pairs in {end_chunk_time - start_chunk_time:.2f} seconds. Found {len(split_docs)} initial chunks. Filtering...")
-            
-            start_filter_time = time.time()
-            filtered_split_docs = filter_documents(split_docs)
-            end_filter_time = time.time()
-            num_yielded = len(filtered_split_docs) if filtered_split_docs else 0
-            logger.info(f"Finished filtering final batch in {end_filter_time - start_filter_time:.2f} seconds. Yielding {num_yielded} chunks.")
-
-            if filtered_split_docs:
-                yield filtered_split_docs
-            raw_pairs_processed_count += current_batch_size
-        
-        logger.info(f"Finished processing chat. Total individual messages: {total_individual_messages}, Total message pairs created: {raw_pairs_processed_count}")
-
-    except Exception as e:
-        logger.error(f"Error during processing chat documents from {json_file}: {e}")
-        return iter([])
-
-# Async function for high-performance chat document processing
-async def process_chat_documents_async(json_file: str, vector_store, batch_size_for_chunking: int = 1000):
-    """
-    High-performance async processing of chat documents with concurrent batch processing.
-    """
-    if not os.path.exists(json_file):
-        logger.warning(f"Warning: JSON file '{json_file}' does not exist.")
-        return 0
-    
-    try:
-        logger.info(f"Starting async chat processing from: {json_file}")
-        start_total_time = time.time()
-        
-        # Load JSON data
-        with open(json_file, 'r') as f:
-            data = json.load(f)
-        
-        if not isinstance(data, list):
-            logger.error(f"Expected JSON array, got {type(data)}")
-            return 0
-        
-        logger.info(f"Loaded {len(data)} chat records for async processing")
-        
-        # Process chat records and create document batches
-        all_batches = []
-        current_batch = []
-        total_individual_messages = 0
-        
-        for chat_record in data:
-            try:
-                messages = []
-                if 'chat' in chat_record and 'history' in chat_record['chat'] and 'messages' in chat_record['chat']['history']:
-                    messages_dict = chat_record['chat']['history']['messages']
-                    messages = list(messages_dict.values())
-                elif 'chat' in chat_record and 'messages' in chat_record['chat']:
-                    messages = chat_record['chat']['messages']
-                else:
-                    continue
-                    
-                total_individual_messages += len(messages)
-                
-                if not messages:
-                    continue
-                
-                # Create message pairs or individual messages based on settings
-                if args.pair_messages:
-                    message_pairs = create_message_pairs(messages)
-                    for pair in message_pairs:
-                        from langchain_core.documents import Document
-                        doc = Document(page_content=pair["content"], metadata=pair["metadata"])
-                        current_batch.append(doc)
-                        
-                        if len(current_batch) >= batch_size_for_chunking:
-                            all_batches.append(current_batch)
-                            current_batch = []
-                else:
-                    # Individual message processing (implement if needed)
-                    pass
-                    
-            except Exception as e:
-                logger.warning(f"Skipping chat record: {e}")
-                continue
-        
-        # Add final batch
-        if current_batch:
-            all_batches.append(current_batch)
-        
-        logger.info(f"Created {len(all_batches)} batches from {total_individual_messages} individual messages")
-        
-        if not all_batches:
-            logger.warning("No chat batches to process")
-            return 0
-        
-        # Process batches concurrently with controlled concurrency
-        total_uploaded = 0
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
-        
-        async def process_and_upload_batch(batch_docs, batch_id):
-            async with semaphore:
-                # Process documents
-                processed_docs = await process_document_batch_async(batch_docs, "chat", batch_id)
-                if processed_docs:
-                    # Upload documents
-                    success = await upload_documents_async(vector_store, processed_docs, batch_id)
-                    return len(processed_docs) if success else 0
-                return 0
-        
-        # Create tasks for all batches
-        tasks = [
-            process_and_upload_batch(batch, i + 1) 
-            for i, batch in enumerate(all_batches)
-        ]
-        
-        # Execute all tasks concurrently
-        logger.info(f"Starting concurrent processing of {len(tasks)} batches (max {MAX_CONCURRENT_BATCHES} concurrent)")
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Count successful uploads
-        for result in results:
-            if isinstance(result, int):
-                total_uploaded += result
-            elif isinstance(result, Exception):
-                logger.error(f"Batch processing failed: {result}")
-        
-        end_total_time = time.time()
-        processing_time = end_total_time - start_total_time
-        
-        logger.info(f"\n🚀 Async chat processing complete:")
-        logger.info(f"  - Total batches processed: {len(all_batches)}")
-        logger.info(f"  - Total chunks uploaded: {total_uploaded}")
-        logger.info(f"  - Total processing time: {processing_time:.2f}s")
-        logger.info(f"  - Average time per batch: {processing_time/len(all_batches):.2f}s")
-        logger.info(f"  - Processing rate: {total_uploaded/processing_time:.1f} chunks/second")
-        
-        return total_uploaded
-        
-    except Exception as e:
-        logger.error(f"Error in async chat processing: {e}")
-        return 0
-
 # Function to filter out empty or very short documents
 def filter_documents(docs, min_word_count=MIN_CONTENT_LENGTH):
     filtered_docs = []
@@ -716,40 +601,6 @@ def filter_documents(docs, min_word_count=MIN_CONTENT_LENGTH):
         logger.info(f"Skipped {skipped} documents with insufficient content (less than {min_word_count} words)")
     
     return filtered_docs
-
-# Async function to process a batch of documents
-async def process_document_batch_async(batch_docs: List, document_type: str = "chat", batch_id: int = 0) -> List:
-    """
-    Asynchronously process a batch of documents: split, filter, and prepare for upload.
-    """
-    try:
-        start_time = time.time()
-        
-        # Run document splitting in a thread pool to avoid blocking
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            split_docs = await loop.run_in_executor(
-                executor, 
-                split_documents_intelligently, 
-                batch_docs, 
-                document_type
-            )
-            
-            # Filter documents in parallel
-            filtered_docs = await loop.run_in_executor(
-                executor,
-                filter_documents,
-                split_docs
-            )
-        
-        end_time = time.time()
-        logger.info(f"Batch {batch_id}: Processed {len(batch_docs)} docs → {len(split_docs)} chunks → {len(filtered_docs)} filtered chunks in {end_time - start_time:.2f}s")
-        
-        return filtered_docs
-        
-    except Exception as e:
-        logger.error(f"Error processing batch {batch_id}: {e}")
-        return []
 
 # Async function to upload documents to Qdrant
 async def upload_documents_async(vector_store, docs: List, batch_id: int = 0) -> bool:
@@ -775,7 +626,6 @@ async def upload_documents_async(vector_store, docs: List, batch_id: int = 0) ->
     except Exception as e:
         logger.error(f"Error uploading batch {batch_id}: {e}")
         return False
-
 
 # Initialize embeddings
 try:
@@ -1082,59 +932,59 @@ elif args.type == 'obsidian':
     logger.info(f"Successfully processed Obsidian documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
 
 elif args.type == 'chat':
-    mode = "message pairing" if args.pair_messages else "individual messages"
-    
     if ENABLE_ASYNC_CHAT:
-        logger.info(f"🚀 Using high-performance async processing for chat documents from: {args.json_file}")
-        logger.info(f"  - Mode: {mode}")
+        logger.info(f"🚀 Using high-performance async processing for chat conversations from: {args.json_file}")
+        logger.info(f"  - New simplified conversation-based approach with code block preservation")
         logger.info(f"  - Max concurrent batches: {MAX_CONCURRENT_BATCHES}")
         logger.info(f"  - GPU-optimized batch size: {BATCH_SIZE}")
         
         # Use async processing for much faster performance
         async def run_async_chat_processing():
-            return await process_chat_documents_async(args.json_file, vector_store, batch_size_for_chunking=1000)
+            return await process_chat_conversations_async(args.json_file, vector_store, batch_size_for_processing=1000)
         
         total_chunks_uploaded_chat = asyncio.run(run_async_chat_processing())
         
         if total_chunks_uploaded_chat == 0:
-            logger.warning("No chat documents were processed. Exiting.")
+            logger.warning("No chat conversations were processed. Exiting.")
             exit(0)
         
         logger.info(f"✅ High-performance async chat processing completed successfully!")
-        logger.info(f"Successfully processed {total_chunks_uploaded_chat} chunks to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
+        logger.info(f"Successfully processed {total_chunks_uploaded_chat} conversation chunks to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
         
     else:
-        # Fall back to legacy synchronous processing
-        logger.info(f"Processing chat documents from: {args.json_file} (legacy synchronous mode with {mode})")
+        # Fall back to synchronous processing
+        logger.info(f"Processing chat conversations from: {args.json_file} (synchronous mode)")
+        logger.info("Using simplified conversation-based processing with code block preservation")
         logger.info("💡 Tip: Set QDRANT_UPLOAD_ASYNC_CHAT=true for much faster processing!")
         
-        doc_batch_generator = collect_chat_documents(args.json_file, batch_size_for_chunking=1000)
+        # Load and process chat conversations
+        docs = collect_chat_conversations(args.json_file)
         
-        total_chunks_uploaded_chat = 0
-        batch_num = 0
-        any_docs_processed = False
-
-        for doc_batch in doc_batch_generator:
-            if not doc_batch:
-                continue
-
-            any_docs_processed = True
-            batch_num += 1
-            num_docs_in_batch = len(doc_batch)
-            total_chunks_uploaded_chat += num_docs_in_batch
-            
-            logger.info(f"Uploading chat document batch {batch_num} with {num_docs_in_batch} chunks to collection '{args.collection}'...")
-            vector_store.add_documents(doc_batch)
-            logger.info(f"Uploaded chat batch {batch_num} ({num_docs_in_batch} chunks).")
-
-        if not any_docs_processed:
-            logger.warning("No chat documents were processed or yielded from the generator. Exiting.")
+        if not docs:
+            logger.warning("No chat conversations found to upload. Exiting.")
             exit(0)
-
-        logger.info(f"\nChat document streaming and upload complete:")
-        logger.info(f"  - Processing mode: {mode}")
-        logger.info(f"  - Total chunks uploaded: {total_chunks_uploaded_chat}")
-        logger.info(f"Successfully processed chat documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
+        
+        # Filter documents
+        docs = filter_documents(docs)
+        
+        if not docs:
+            logger.warning("No chat documents remaining after filtering. Exiting.")
+            exit(0)
+        
+        total_words = sum(len(doc.page_content.split()) for doc in docs)
+        logger.info(f"{len(docs)} chat conversation chunks loaded with a total of {total_words:,} words.")
+        
+        # Upload in batches
+        logger.info(f"Uploading {len(docs)} chat conversation chunks to collection '{args.collection}'...")
+        total_chunks_uploaded = 0
+        
+        for i in range(0, len(docs), BATCH_SIZE):
+            batch_docs = docs[i:i+BATCH_SIZE]
+            vector_store.add_documents(batch_docs)
+            total_chunks_uploaded += len(batch_docs)
+            logger.info(f"Uploaded batch {i//BATCH_SIZE + 1}/{(len(docs)-1)//BATCH_SIZE + 1} ({len(batch_docs)} chunks)")
+        
+        logger.info(f"Successfully processed {total_chunks_uploaded} conversation chunks to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
 
 else:
     logger.error(f"Error: Unknown document type specified: {args.type}")
