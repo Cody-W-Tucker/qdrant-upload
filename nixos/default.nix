@@ -51,13 +51,14 @@ let
   # Define default options
   defaultOptions = {
     qdrantUrl = "http://localhost:6333";
-    defaultCollection = "personal";
     embeddingModel = "nomic-embed-text:latest";
     vectorDimensions = 768;
     distanceMetric = "Cosine";
     batchSize = 2000; # Optimized for RTX 3070 GPU
     minContentLength = 50;
-    obsidianDirectories = [ ];
+    # Ollama settings
+    ollamaUrl = "http://localhost:11434";
+    ollamaTimeout = 300;
     # New async performance settings
     chunkSize = 2500; # Larger chunks for better chat message completeness
     chunkOverlap = 200; # Proportional overlap
@@ -89,14 +90,17 @@ stdenv.mkDerivation {
     #!/bin/sh
     # Export default environment variables
     export QDRANT_UPLOAD_URL="${defaultOptions.qdrantUrl}"
-    export QDRANT_UPLOAD_COLLECTION="${defaultOptions.defaultCollection}"
     export QDRANT_UPLOAD_MODEL="${defaultOptions.embeddingModel}"
     export QDRANT_UPLOAD_DIMENSIONS="${toString defaultOptions.vectorDimensions}"
     export QDRANT_UPLOAD_DISTANCE="${defaultOptions.distanceMetric}"
     export QDRANT_UPLOAD_BATCH_SIZE="${toString defaultOptions.batchSize}"
     export QDRANT_UPLOAD_MIN_LENGTH="${toString defaultOptions.minContentLength}"
     
-    # New async performance variables (RTX 3070 optimized)
+    # Ollama settings
+    export OLLAMA_URL="${defaultOptions.ollamaUrl}"
+    export OLLAMA_TIMEOUT="${toString defaultOptions.ollamaTimeout}"
+    
+    # Async performance variables (RTX 3070 optimized)
     export QDRANT_UPLOAD_CHUNK_SIZE="${toString defaultOptions.chunkSize}"
     export QDRANT_UPLOAD_CHUNK_OVERLAP="${toString defaultOptions.chunkOverlap}"
     export QDRANT_UPLOAD_SEMANTIC_CHUNKER="${defaultOptions.semanticChunker}"

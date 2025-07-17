@@ -63,7 +63,7 @@ let
 in
 {
   options.services.qdrant-upload = {
-    enable = mkEnableOption "Enable the Qdrant document uploader service";
+    enable = mkEnableOption "Enable the Qdrant document upload service";
 
     package = mkOption {
       type = types.package;
@@ -139,21 +139,34 @@ in
       description = "Enable high-performance async processing for chat";
     };
 
+    # Ollama settings
+    ollamaUrl = mkOption {
+      type = types.str;
+      default = "http://localhost:11434";
+      description = "URL of the Ollama service";
+    };
+
+    ollamaTimeout = mkOption {
+      type = types.int;
+      default = 300;
+      description = "Timeout in seconds for Ollama API requests";
+    };
+
     environmentFile = mkOption {
       type = types.nullOr types.path;
       default = null;
-      description = "Path to environment file for additional configuration";
+      description = "Path to environment file for additional configuration (optional)";
     };
 
     user = mkOption {
       type = types.str;
-      default = "nobody";
+      default = "qdrant-upload";
       description = "User to run the service as";
     };
 
     group = mkOption {
       type = types.str;
-      default = "nobody";
+      default = "qdrant-upload";
       description = "Group to run the service as";
     };
 
@@ -192,34 +205,22 @@ in
       '';
     };
 
-    # Legacy options for backward compatibility
-    defaultCollection = mkOption {
-      type = types.str;
-      default = "personal";
-      description = "Default collection name (legacy - use sources instead)";
-    };
-
-    obsidianDirectories = mkOption {
-      type = types.listOf types.str;
-      default = [ ];
-      description = "Default Obsidian directories (legacy - use sources instead)";
-    };
-
     # Service settings
-    enableService = mkOption {
-      type = types.bool;
-      default = false;
-      description = "Enable the Qdrant uploader systemd services";
-    };
-
     defaultSchedule = mkOption {
       type = types.str;
-      default = "*-*-* 00:00:00"; # Daily at midnight
+      default = "*-*-* 02:00:00"; # Daily at 2 AM
       description = "Default schedule for service execution in systemd timer format";
+    };
+
+    packageOnly = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Only install the package without creating SystemD services";
     };
   };
 
   config = mkIf cfg.enable {
+    # Always install package and set environment
     environment.systemPackages = [
       cfg.package
       # Add unstructured-api for better document format support
@@ -227,10 +228,13 @@ in
     ];
 
     environment.variables = {
+      # Qdrant settings
       QDRANT_UPLOAD_URL = cfg.qdrantUrl;
       QDRANT_UPLOAD_MODEL = cfg.embeddingModel;
       QDRANT_UPLOAD_DIMENSIONS = toString cfg.vectorDimensions;
       QDRANT_UPLOAD_DISTANCE = cfg.distanceMetric;
+
+      # Performance settings
       QDRANT_UPLOAD_BATCH_SIZE = toString cfg.batchSize;
       QDRANT_UPLOAD_MIN_LENGTH = toString cfg.minContentLength;
       QDRANT_UPLOAD_CHUNK_SIZE = toString cfg.chunkSize;
@@ -239,13 +243,23 @@ in
       QDRANT_UPLOAD_MAX_CONCURRENT = toString cfg.maxConcurrent;
       QDRANT_UPLOAD_ASYNC_CHAT = if cfg.asyncChat then "true" else "false";
 
-      # Legacy support
-      QDRANT_UPLOAD_COLLECTION = cfg.defaultCollection;
-      QDRANT_FOLDERS = concatStringsSep " " cfg.obsidianDirectories;
+      # Ollama settings
+      OLLAMA_URL = cfg.ollamaUrl;
+      OLLAMA_TIMEOUT = toString cfg.ollamaTimeout;
     };
 
-    # Create systemd services for each source
-    systemd.services = mkIf cfg.enableService (
+    # Create user and group for the service (unless packageOnly)
+    users.users.${cfg.user} = mkIf (!cfg.packageOnly) {
+      isSystemUser = true;
+      group = cfg.group;
+      home = "/var/lib/qdrant-upload";
+      createHome = true;
+    };
+
+    users.groups.${cfg.group} = mkIf (!cfg.packageOnly) { };
+
+    # Create systemd services for each source (unless packageOnly)
+    systemd.services = mkIf (!cfg.packageOnly) (
       # Create a service for each configured source
       listToAttrs
         (map
@@ -285,29 +299,12 @@ in
               } else { });
             };
           })
-          cfg.sources) //
-      # Legacy service for backward compatibility (when no sources defined)
-      (optionalAttrs (cfg.sources == [ ]) {
-        qdrant-upload = {
-          description = "Qdrant Document Upload Service (Legacy)";
-          after = [ "network.target" ];
-          wantedBy = mkIf (cfg.defaultSchedule == null) [ "multi-user.target" ];
-          path = [ cfg.package ];
-
-          serviceConfig = {
-            Type = "oneshot";
-            ExecStart = "${cfg.package}/bin/qdrant-upload obsidian --collection ${cfg.defaultCollection}";
-            User = cfg.user;
-            Group = cfg.group;
-          } // (if cfg.environmentFile != null then {
-            EnvironmentFile = cfg.environmentFile;
-          } else { });
-        };
-      })
+          cfg.sources)
     );
 
-    # Create timers for each source
-    systemd.timers = mkIf cfg.enableService (
+    # Create timers for each source (unless packageOnly)
+    systemd.timers = mkIf (!cfg.packageOnly) (
+      # Create timers for each configured source
       listToAttrs
         (map
           (source: {
@@ -323,30 +320,13 @@ in
               };
             };
           })
-          cfg.sources) //
-      # Legacy timer for backward compatibility
-      (optionalAttrs (cfg.sources == [ ] && cfg.defaultSchedule != null) {
-        qdrant-upload = {
-          description = "Timer for Qdrant Document Upload Service (Legacy)";
-          wantedBy = [ "timers.target" ];
-
-          timerConfig = {
-            OnCalendar = cfg.defaultSchedule;
-            Unit = "qdrant-upload.service";
-            Persistent = true;
-          };
-        };
-      })
+          cfg.sources)
     );
-
-
 
     # Validation warnings
     warnings =
-      optional (cfg.obsidianDirectories != [ ] && cfg.sources != [ ])
-        "Both 'obsidianDirectories' (legacy) and 'sources' are configured. Consider migrating to 'sources' only." ++
-      optional (cfg.sources == [ ] && cfg.obsidianDirectories == [ ])
-        "No sources configured. Either set 'sources' or 'obsidianDirectories' (legacy)." ++
+      optional (cfg.sources == [ ])
+        "No sources configured. You must configure at least one source in 'sources'." ++
       (builtins.filter (x: x != null) (map
         (source:
           if source.type == "chat" && source.jsonFile == null then
