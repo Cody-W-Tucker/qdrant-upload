@@ -276,7 +276,6 @@ in
                 ExecStart =
                   let
                     args = [
-                      "--type ${source.type}"
                       "--collection ${source.collection}"
                     ] ++ (
                       if source.type == "chat" then
@@ -291,7 +290,7 @@ in
                       optional source.forceUpdate "--force-update"
                     );
                   in
-                  "${cfg.package}/bin/qdrant-upload ${concatStringsSep " " args}";
+                  "${cfg.package}/bin/qdrant-upload ${source.type} ${concatStringsSep " " args}";
                 User = cfg.user;
                 Group = cfg.group;
               } // (if cfg.environmentFile != null then {
