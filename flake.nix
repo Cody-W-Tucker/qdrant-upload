@@ -3,103 +3,146 @@
 
   inputs.nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1.*.tar.gz";
 
-  outputs = { self, nixpkgs }:
+  outputs =
+    { self, nixpkgs }:
     let
-      supportedSystems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
-      forEachSupportedSystem = f: nixpkgs.lib.genAttrs supportedSystems (system: f {
-        pkgs = import nixpkgs { inherit system; };
-      });
+      supportedSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
+      forEachSupportedSystem =
+        f:
+        nixpkgs.lib.genAttrs supportedSystems (
+          system:
+          f {
+            pkgs = import nixpkgs { inherit system; };
+          }
+        );
 
       # Define common Python packages and options
-      makeConfig = pkgs: with pkgs.lib; let
-        # Define default options (these can be overridden by package options)
-        defaultOptions = {
-          qdrantUrl = "http://localhost:6333";
-          defaultCollection = "personal";
-          embeddingModel = "nomic-embed-text:latest";
-          vectorDimensions = 768;
-          distanceMetric = "Cosine";
-          batchSize = 2000; # Optimized for RTX 3070 GPU
-          minContentLength = 50;
-          obsidianDirectories = [ ];
-          # New async performance settings
-          chunkSize = 2500; # Larger chunks for better chat message completeness
-          chunkOverlap = 200; # Proportional overlap
-          semanticChunker = "false"; # auto=chat only, true=all, false=none (default: false for performance)
-          maxConcurrent = 4; # Optimal for RTX 3070 (8GB VRAM)
-          asyncChat = true; # Enable high-performance async processing
-        };
-
-        # Build langchain-experimental compatible with nixpkgs versions
-        langchain-experimental = pkgs.python312Packages.buildPythonPackage rec {
-          pname = "langchain_experimental";
-          version = "0.3.1"; # Using an older version compatible with langchain 0.3.20
-          format = "pyproject";
-          src = pkgs.fetchPypi {
-            inherit pname version;
-            sha256 = "b4moidS+K/ZQdr2NYbPTbpSFXSDxjqXAZk4AcA8q/Vg=";
+      makeConfig =
+        pkgs:
+        with pkgs.lib;
+        let
+          # Define default options (these can be overridden by package options)
+          defaultOptions = {
+            qdrantUrl = "http://localhost:6333";
+            defaultCollection = "personal";
+            embeddingModel = "nomic-embed-text:latest";
+            vectorDimensions = 768;
+            distanceMetric = "Cosine";
+            batchSize = 2000; # Optimized for RTX 3070 GPU
+            minContentLength = 50;
+            obsidianDirectories = [ ];
+            # New async performance settings
+            chunkSize = 2500; # Larger chunks for better chat message completeness
+            chunkOverlap = 200; # Proportional overlap
+            semanticChunker = "false"; # auto=chat only, true=all, false=none (default: false for performance)
+            maxConcurrent = 4; # Optimal for RTX 3070 (8GB VRAM)
+            asyncChat = true; # Enable high-performance async processing
           };
-          nativeBuildInputs = [ pkgs.python312Packages.poetry-core ];
-          propagatedBuildInputs = with pkgs.python312Packages; [ langchain langchain-community ];
-        };
 
-        # Build langchain-qdrant
-        langchain-qdrant = pkgs.python312Packages.buildPythonPackage rec {
-          pname = "langchain_qdrant";
-          version = "0.2.0"; # Use latest version or adjust as needed
-          format = "pyproject";
-          src = pkgs.fetchPypi {
-            inherit pname version;
-            sha256 = "QbhXPLsbRwb3bcdpJR2Oaz5BB+zV+pfFgUGXfsGfunU=";
+          # Build langchain-experimental compatible with nixpkgs versions
+          langchain-experimental = pkgs.python313Packages.buildPythonPackage rec {
+            pname = "langchain_experimental";
+            version = "0.3.1"; # Using an older version compatible with langchain 0.3.20
+            format = "pyproject";
+            src = pkgs.fetchPypi {
+              inherit pname version;
+              sha256 = "b4moidS+K/ZQdr2NYbPTbpSFXSDxjqXAZk4AcA8q/Vg=";
+            };
+            nativeBuildInputs = [ pkgs.python313Packages.poetry-core ];
+            propagatedBuildInputs = with pkgs.python313Packages; [
+              langchain
+              langchain-community
+            ];
           };
-          nativeBuildInputs = [ pkgs.python312Packages.poetry-core ];
-          propagatedBuildInputs = with pkgs.python312Packages; [
-            langchain
-            qdrant-client
-          ];
-        };
 
-        # Function to create a Python environment with specific package versions and config
-        mkPythonEnv =
-          { qdrantUrl ? defaultOptions.qdrantUrl
-          , defaultCollection ? defaultOptions.defaultCollection
-          , embeddingModel ? defaultOptions.embeddingModel
-          , vectorDimensions ? defaultOptions.vectorDimensions
-          , distanceMetric ? defaultOptions.distanceMetric
-          , batchSize ? defaultOptions.batchSize
-          , minContentLength ? defaultOptions.minContentLength
-          , obsidianDirectories ? defaultOptions.obsidianDirectories
-          , chunkSize ? defaultOptions.chunkSize
-          , chunkOverlap ? defaultOptions.chunkOverlap
-          , semanticChunker ? defaultOptions.semanticChunker
-          , maxConcurrent ? defaultOptions.maxConcurrent
-          , asyncChat ? defaultOptions.asyncChat
-          }: (pkgs.python312.withPackages (ps: with ps; [
-            python-dotenv
-            qdrant-client
-            # Use packages from nixpkgs
-            langchain
-            langchain-community
-            langchain-text-splitters
-            unstructured
-            jq
-            # Our custom packages
+          # Build langchain-qdrant
+          langchain-qdrant = pkgs.python313Packages.buildPythonPackage rec {
+            pname = "langchain_qdrant";
+            version = "1.1.0"; # Use latest version or adjust as needed
+            format = "pyproject";
+            src = pkgs.fetchPypi {
+              inherit pname version;
+              sha256 = "433236845736f973543ac6b7137f9d7fa511b7539373fbc6565c581d3ba59373";
+            };
+            nativeBuildInputs = [ pkgs.python313Packages.poetry-core ];
+            propagatedBuildInputs = with pkgs.python313Packages; [
+              langchain
+              qdrant-client
+            ];
+          };
+
+          # Function to create a Python environment with specific package versions and config
+          mkPythonEnv =
+            {
+              qdrantUrl ? defaultOptions.qdrantUrl,
+              defaultCollection ? defaultOptions.defaultCollection,
+              embeddingModel ? defaultOptions.embeddingModel,
+              vectorDimensions ? defaultOptions.vectorDimensions,
+              distanceMetric ? defaultOptions.distanceMetric,
+              batchSize ? defaultOptions.batchSize,
+              minContentLength ? defaultOptions.minContentLength,
+              obsidianDirectories ? defaultOptions.obsidianDirectories,
+              chunkSize ? defaultOptions.chunkSize,
+              chunkOverlap ? defaultOptions.chunkOverlap,
+              semanticChunker ? defaultOptions.semanticChunker,
+              maxConcurrent ? defaultOptions.maxConcurrent,
+              asyncChat ? defaultOptions.asyncChat,
+            }:
+            (pkgs.python313.withPackages (
+              ps: with ps; [
+                python-dotenv
+                qdrant-client
+                # Use packages from nixpkgs
+                langchain
+                langchain-community
+                langchain-text-splitters
+                unstructured
+                jq
+                # Our custom packages
+                langchain-experimental
+                langchain-qdrant
+              ]
+            )).overrideAttrs
+              (old: {
+                passthru = {
+                  inherit
+                    qdrantUrl
+                    defaultCollection
+                    embeddingModel
+                    vectorDimensions
+                    distanceMetric
+                    batchSize
+                    minContentLength
+                    obsidianDirectories
+                    chunkSize
+                    chunkOverlap
+                    semanticChunker
+                    maxConcurrent
+                    asyncChat
+                    ;
+                };
+              });
+        in
+        {
+          inherit
+            defaultOptions
             langchain-experimental
             langchain-qdrant
-          ])).overrideAttrs (old: {
-            passthru = {
-              inherit qdrantUrl defaultCollection embeddingModel vectorDimensions
-                distanceMetric batchSize minContentLength obsidianDirectories
-                chunkSize chunkOverlap semanticChunker maxConcurrent asyncChat;
-            };
-          });
-      in
-      {
-        inherit defaultOptions langchain-experimental langchain-qdrant mkPythonEnv;
-      };
+            mkPythonEnv
+            ;
+        };
 
       # Helper function to create a shell with default folders
-      mkDevShell = { pkgs, config ? { } }:
+      mkDevShell =
+        {
+          pkgs,
+          config ? { },
+        }:
         let
           configUtils = makeConfig pkgs;
           options = pkgs.lib.recursiveUpdate configUtils.defaultOptions config;
@@ -107,7 +150,10 @@
           dirs = builtins.concatStringsSep " " (map (dir: ''"${dir}"'') options.obsidianDirectories);
         in
         pkgs.mkShell {
-          packages = [ pythonEnv pkgs.jq ];
+          packages = [
+            pythonEnv
+            pkgs.jq
+          ];
           shellHook = ''
             # Load .env file if it exists
             if [ -f .env ]; then
@@ -116,7 +162,7 @@
               source .env
               set +a
             fi
-            
+
             # Export configuration environment variables with fallbacks
             export QDRANT_UPLOAD_URL="''${QDRANT_UPLOAD_URL:-${options.qdrantUrl}}"
             export QDRANT_UPLOAD_COLLECTION="''${QDRANT_UPLOAD_COLLECTION:-${options.defaultCollection}}"
@@ -125,13 +171,15 @@
             export QDRANT_UPLOAD_DISTANCE="''${QDRANT_UPLOAD_DISTANCE:-${options.distanceMetric}}"
             export QDRANT_UPLOAD_BATCH_SIZE="''${QDRANT_UPLOAD_BATCH_SIZE:-${toString options.batchSize}}"
             export QDRANT_UPLOAD_MIN_LENGTH="''${QDRANT_UPLOAD_MIN_LENGTH:-${toString options.minContentLength}}"
-            
+
             # New async performance variables (RTX 3070 optimized)
             export QDRANT_UPLOAD_CHUNK_SIZE="''${QDRANT_UPLOAD_CHUNK_SIZE:-${toString options.chunkSize}}"
             export QDRANT_UPLOAD_CHUNK_OVERLAP="''${QDRANT_UPLOAD_CHUNK_OVERLAP:-${toString options.chunkOverlap}}"
             export QDRANT_UPLOAD_SEMANTIC_CHUNKER="''${QDRANT_UPLOAD_SEMANTIC_CHUNKER:-${options.semanticChunker}}"
             export QDRANT_UPLOAD_MAX_CONCURRENT="''${QDRANT_UPLOAD_MAX_CONCURRENT:-${toString options.maxConcurrent}}"
-            export QDRANT_UPLOAD_ASYNC_CHAT="''${QDRANT_UPLOAD_ASYNC_CHAT:-${if options.asyncChat then "true" else "false"}}"
+            export QDRANT_UPLOAD_ASYNC_CHAT="''${QDRANT_UPLOAD_ASYNC_CHAT:-${
+              if options.asyncChat then "true" else "false"
+            }}"
 
             # Use QDRANT_FOLDERS if set, otherwise fall back to obsidianDirectories
             if [ -n "$QDRANT_FOLDERS" ]; then
@@ -165,7 +213,11 @@
         };
 
       # Create a wrapped script for uploading documents
-      mkUploader = { pkgs, config ? { } }:
+      mkUploader =
+        {
+          pkgs,
+          config ? { },
+        }:
         let
           configUtils = makeConfig pkgs;
           options = pkgs.lib.recursiveUpdate configUtils.defaultOptions config;
@@ -175,7 +227,10 @@
         in
         pkgs.writeShellApplication {
           name = "qdrant-upload";
-          runtimeInputs = [ pythonEnv pkgs.jq ];
+          runtimeInputs = [
+            pythonEnv
+            pkgs.jq
+          ];
           text = ''
             # Load .env file if it exists
             if [ -f .env ]; then
@@ -195,13 +250,15 @@
             export QDRANT_UPLOAD_DISTANCE="''${QDRANT_UPLOAD_DISTANCE:-${options.distanceMetric}}"
             export QDRANT_UPLOAD_BATCH_SIZE="''${QDRANT_UPLOAD_BATCH_SIZE:-${toString options.batchSize}}"
             export QDRANT_UPLOAD_MIN_LENGTH="''${QDRANT_UPLOAD_MIN_LENGTH:-${toString options.minContentLength}}"
-            
+
             # New async performance variables (RTX 3070 optimized)
             export QDRANT_UPLOAD_CHUNK_SIZE="''${QDRANT_UPLOAD_CHUNK_SIZE:-${toString options.chunkSize}}"
             export QDRANT_UPLOAD_CHUNK_OVERLAP="''${QDRANT_UPLOAD_CHUNK_OVERLAP:-${toString options.chunkOverlap}}"
             export QDRANT_UPLOAD_SEMANTIC_CHUNKER="''${QDRANT_UPLOAD_SEMANTIC_CHUNKER:-${options.semanticChunker}}"
             export QDRANT_UPLOAD_MAX_CONCURRENT="''${QDRANT_UPLOAD_MAX_CONCURRENT:-${toString options.maxConcurrent}}"
-            export QDRANT_UPLOAD_ASYNC_CHAT="''${QDRANT_UPLOAD_ASYNC_CHAT:-${if options.asyncChat then "true" else "false"}}"
+            export QDRANT_UPLOAD_ASYNC_CHAT="''${QDRANT_UPLOAD_ASYNC_CHAT:-${
+              if options.asyncChat then "true" else "false"
+            }}"
 
             if [ -z "$1" ]; then
               echo "Usage: qdrant-upload <type> [options]"
@@ -226,7 +283,7 @@
               source .env
               set +a
             fi
-            
+
             # Check if QDRANT_FOLDERS is set, use that for directories
             if [ -n "$QDRANT_FOLDERS" ]; then
               # Build array of dirs, properly quoted
@@ -260,34 +317,49 @@
       nixosModules.default = import ./nixos/module.nix;
 
       # Create a standard package
-      packages = forEachSupportedSystem ({ pkgs }: {
-        default = pkgs.callPackage ./nixos/default.nix {
-          version = "0.1.0";
-        };
+      packages = forEachSupportedSystem (
+        { pkgs }:
+        {
+          default = pkgs.callPackage ./nixos/default.nix {
+            version = "0.1.0";
+          };
 
-        custom = mkUploader {
-          inherit pkgs;
-          config = { };
-        };
-      });
+          custom = mkUploader {
+            inherit pkgs;
+            config = { };
+          };
+        }
+      );
 
       # Development shells
-      devShells = forEachSupportedSystem ({ pkgs }: {
-        default = mkDevShell {
-          inherit pkgs;
-          config = {
-            obsidianDirectories = [ "$HOME/Documents/Personal/Journal" "$HOME/Documents/Personal/Knowledge" ];
+      devShells = forEachSupportedSystem (
+        { pkgs }:
+        {
+          default = mkDevShell {
+            inherit pkgs;
+            config = {
+              obsidianDirectories = [
+                "$HOME/Documents/Personal/Journal"
+                "$HOME/Documents/Personal/Knowledge"
+              ];
+            };
           };
-        };
-        custom = mkDevShell { inherit pkgs; config = { }; }; # No defaults, rely on QDRANT_FOLDERS
-      });
+          custom = mkDevShell {
+            inherit pkgs;
+            config = { };
+          }; # No defaults, rely on QDRANT_FOLDERS
+        }
+      );
 
       # Define apps
-      apps = forEachSupportedSystem ({ pkgs }: {
-        default = {
-          type = "app";
-          program = "${self.packages.${pkgs.system}.default}/bin/qdrant-upload";
-        };
-      });
+      apps = forEachSupportedSystem (
+        { pkgs }:
+        {
+          default = {
+            type = "app";
+            program = "${self.packages.${pkgs.system}.default}/bin/qdrant-upload";
+          };
+        }
+      );
     };
 }
