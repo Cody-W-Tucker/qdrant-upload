@@ -6,29 +6,19 @@
 }:
 
 let
-  # Build langchain-experimental compatible with nixpkgs versions
-  langchain-experimental = python3.pkgs.buildPythonPackage rec {
-    pname = "langchain_experimental";
-    version = "0.3.1"; # Using an older version compatible with langchain 0.3.20
-    format = "pyproject";
-    src = python3.pkgs.fetchPypi {
-      inherit pname version;
-      sha256 = "b4moidS+K/ZQdr2NYbPTbpSFXSDxjqXAZk4AcA8q/Vg=";
-    };
-    nativeBuildInputs = [ python3.pkgs.poetry-core ];
-    propagatedBuildInputs = with python3.pkgs; [ langchain langchain-community ];
-  };
+  # Use langchain-experimental from nixpkgs
+  langchain-experimental = python3.pkgs.langchain-experimental;
 
   # Build langchain-qdrant
   langchain-qdrant = python3.pkgs.buildPythonPackage rec {
     pname = "langchain_qdrant";
-    version = "0.2.0"; # Use latest version or adjust as needed
+    version = "0.2.1"; # Use latest version or adjust as needed
     format = "pyproject";
     src = python3.pkgs.fetchPypi {
       inherit pname version;
-      sha256 = "QbhXPLsbRwb3bcdpJR2Oaz5BB+zV+pfFgUGXfsGfunU=";
+      sha256 = "01ig99g659glg9w7my1ja24hylc0dgfn8kk7pslq2cak69x7d5h5";
     };
-    nativeBuildInputs = [ python3.pkgs.poetry-core ];
+    nativeBuildInputs = [ python3.pkgs.pdm-backend ];
     propagatedBuildInputs = with python3.pkgs; [
       langchain
       qdrant-client

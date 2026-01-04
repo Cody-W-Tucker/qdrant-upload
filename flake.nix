@@ -44,21 +44,8 @@
             asyncChat = true; # Enable high-performance async processing
           };
 
-          # Build langchain-experimental compatible with nixpkgs versions
-          langchain-experimental = pkgs.python312Packages.buildPythonPackage rec {
-            pname = "langchain_experimental";
-            version = "0.3.1"; # Using an older version compatible with langchain 0.3.20
-            format = "pyproject";
-            src = pkgs.fetchPypi {
-              inherit pname version;
-              sha256 = "b4moidS+K/ZQdr2NYbPTbpSFXSDxjqXAZk4AcA8q/Vg=";
-            };
-            nativeBuildInputs = [ pkgs.python312Packages.poetry-core ];
-            propagatedBuildInputs = with pkgs.python312Packages; [
-              langchain
-              langchain-community
-            ];
-          };
+           # Use langchain-experimental from nixpkgs
+           langchain-experimental = pkgs.python312Packages.langchain-experimental;
 
           # Build langchain-qdrant
           langchain-qdrant = pkgs.python312Packages.buildPythonPackage rec {
