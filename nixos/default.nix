@@ -12,13 +12,13 @@ let
   # Build langchain-qdrant
   langchain-qdrant = python3.pkgs.buildPythonPackage rec {
     pname = "langchain_qdrant";
-    version = "0.2.1"; # Use latest version or adjust as needed
+    version = "1.1.0"; # Use latest version or adjust as needed
     format = "pyproject";
     src = python3.pkgs.fetchPypi {
       inherit pname version;
-      sha256 = "01ig99g659glg9w7my1ja24hylc0dgfn8kk7pslq2cak69x7d5h5";
+      sha256 = "QzI2hFc2+XNUOsa3E3+df6URt1OTc/vGVlxYHTulk3M=";
     };
-    nativeBuildInputs = [ python3.pkgs.pdm-backend ];
+    nativeBuildInputs = [ python3.pkgs.hatchling ];
     propagatedBuildInputs = with python3.pkgs; [
       langchain
       qdrant-client

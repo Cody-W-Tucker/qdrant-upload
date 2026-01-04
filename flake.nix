@@ -1,7 +1,7 @@
 {
   description = "A Nix-flake-based Python document uploader for Qdrant";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs =
     { self, nixpkgs }:
@@ -44,57 +44,64 @@
             asyncChat = true; # Enable high-performance async processing
           };
 
-           # Use langchain-experimental from nixpkgs
-           langchain-experimental = pkgs.python312Packages.langchain-experimental;
+          # Use langchain-experimental from nixpkgs
+          langchain-experimental = pkgs.python3.pkgs.langchain-experimental;
 
           # Build langchain-qdrant
-          langchain-qdrant = pkgs.python312Packages.buildPythonPackage rec {
+          langchain-qdrant = pkgs.python3.pkgs.buildPythonPackage rec {
             pname = "langchain_qdrant";
-            version = "0.2.1"; # Compatible with langchain-core 0.3.x
+            version = "1.1.0"; # Latest version compatible with newer langchain
             format = "pyproject";
             src = pkgs.fetchPypi {
               inherit pname version;
-              sha256 = "0z1bdbd7ygi37wvlynk9jx95kjssdg5dqvxyycr7rs05wgiwrn0r";
+              sha256 = "QzI2hFc2+XNUOsa3E3+df6URt1OTc/vGVlxYHTulk3M=";
             };
-            nativeBuildInputs = [ pkgs.python312Packages.pdm-backend ];
-            propagatedBuildInputs = with pkgs.python312Packages; [
+            nativeBuildInputs = [ pkgs.python3.pkgs.hatchling ];
+            propagatedBuildInputs = with pkgs.python3.pkgs; [
               langchain
               qdrant-client
             ];
           };
 
+          # Create python package set with overrides
+          pythonPkgs = pkgs.python3.pkgs.overrideScope (self: super: {
+            duckdb-engine = super.duckdb-engine.overridePythonAttrs (old: {
+              doCheck = false;
+            });
+          });
+
           # Function to create a Python environment with specific package versions and config
           mkPythonEnv =
-            {
-              qdrantUrl ? defaultOptions.qdrantUrl,
-              defaultCollection ? defaultOptions.defaultCollection,
-              embeddingModel ? defaultOptions.embeddingModel,
-              vectorDimensions ? defaultOptions.vectorDimensions,
-              distanceMetric ? defaultOptions.distanceMetric,
-              batchSize ? defaultOptions.batchSize,
-              minContentLength ? defaultOptions.minContentLength,
-              obsidianDirectories ? defaultOptions.obsidianDirectories,
-              chunkSize ? defaultOptions.chunkSize,
-              chunkOverlap ? defaultOptions.chunkOverlap,
-              semanticChunker ? defaultOptions.semanticChunker,
-              maxConcurrent ? defaultOptions.maxConcurrent,
-              asyncChat ? defaultOptions.asyncChat,
-            }:
-            (pkgs.python312.withPackages (
-              ps: with ps; [
-                python-dotenv
-                qdrant-client
-                # Use packages from nixpkgs
-                langchain
-                langchain-community
-                langchain-text-splitters
-                unstructured
-                jq
-                # Our custom packages
-                langchain-experimental
-                langchain-qdrant
-              ]
-            )).overrideAttrs
+          {
+            qdrantUrl ? defaultOptions.qdrantUrl,
+            defaultCollection ? defaultOptions.defaultCollection,
+            embeddingModel ? defaultOptions.embeddingModel,
+            vectorDimensions ? defaultOptions.vectorDimensions,
+            distanceMetric ? defaultOptions.distanceMetric,
+            batchSize ? defaultOptions.batchSize,
+            minContentLength ? defaultOptions.minContentLength,
+            obsidianDirectories ? defaultOptions.obsidianDirectories,
+            chunkSize ? defaultOptions.chunkSize,
+            chunkOverlap ? defaultOptions.chunkOverlap,
+            semanticChunker ? defaultOptions.semanticChunker,
+            maxConcurrent ? defaultOptions.maxConcurrent,
+            asyncChat ? defaultOptions.asyncChat,
+          }:
+          (pythonPkgs.python.withPackages (
+            ps: with ps; [
+              python-dotenv
+              qdrant-client
+              # Use packages from nixpkgs
+              langchain
+              langchain-community
+              langchain-text-splitters
+              unstructured
+              jq
+              # Our custom packages
+              langchain-experimental
+              langchain-qdrant
+            ]
+          )).overrideAttrs
               (old: {
                 passthru = {
                   inherit
