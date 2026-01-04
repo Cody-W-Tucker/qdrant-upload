@@ -6,8 +6,15 @@
 }:
 
 let
-  # Use langchain-experimental from nixpkgs
-  langchain-experimental = python3.pkgs.langchain-experimental;
+  # Use python312 for langchain-experimental
+  python312 = stdenv.mkDerivation {
+    name = "python312-wrapper";
+    buildInputs = [ python3 ];
+    python312Packages = import <nixpkgs> { inherit stdenv; }.python312Packages;
+  };
+
+  # Use langchain-experimental from python312Packages
+  langchain-experimental = (import <nixpkgs> { inherit stdenv; }).python312Packages.langchain-experimental;
 
   # Build langchain-qdrant
   langchain-qdrant = python3.pkgs.buildPythonPackage rec {

@@ -1,7 +1,7 @@
 {
   description = "A Nix-flake-based Python document uploader for Qdrant";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
 
   outputs =
     { self, nixpkgs }:
@@ -45,30 +45,26 @@
           };
 
           # Use langchain-experimental from nixpkgs
-          langchain-experimental = pkgs.python3.pkgs.langchain-experimental;
+          langchain-experimental = pythonWithOverrides.pkgs.langchain-experimental;
 
           # Build langchain-qdrant
-          langchain-qdrant = pkgs.python3.pkgs.buildPythonPackage rec {
+          langchain-qdrant = pythonWithOverrides.pkgs.buildPythonPackage rec {
             pname = "langchain_qdrant";
-            version = "1.1.0"; # Latest version compatible with newer langchain
+            version = "0.2.1"; # Use version compatible with nixos-24.11 packages
             format = "pyproject";
-            src = pkgs.fetchPypi {
+            src = pythonWithOverrides.pkgs.fetchPypi {
               inherit pname version;
               sha256 = "QzI2hFc2+XNUOsa3E3+df6URt1OTc/vGVlxYHTulk3M=";
             };
-            nativeBuildInputs = [ pkgs.python3.pkgs.hatchling ];
-            propagatedBuildInputs = with pkgs.python3.pkgs; [
+            nativeBuildInputs = [ pythonWithOverrides.pkgs.pdm-backend ];
+            propagatedBuildInputs = with pythonWithOverrides.pkgs; [
               langchain
               qdrant-client
             ];
           };
 
-          # Create python package set with overrides
-          pythonPkgs = pkgs.python3.pkgs.overrideScope (self: super: {
-            duckdb-engine = super.duckdb-engine.overridePythonAttrs (old: {
-              doCheck = false;
-            });
-          });
+          # Use python312 for consistency with nixos-24.11
+          pythonWithOverrides = pkgs.python312;
 
           # Function to create a Python environment with specific package versions and config
           mkPythonEnv =
@@ -87,16 +83,16 @@
             maxConcurrent ? defaultOptions.maxConcurrent,
             asyncChat ? defaultOptions.asyncChat,
           }:
-          (pythonPkgs.python.withPackages (
-            ps: with ps; [
-              python-dotenv
-              qdrant-client
+          (pythonWithOverrides.withPackages (
+            ps: [
+              ps.python-dotenv
+              ps.qdrant-client
               # Use packages from nixpkgs
-              langchain
-              langchain-community
-              langchain-text-splitters
-              unstructured
-              jq
+              ps.langchain
+              ps.langchain-community
+              ps.langchain-text-splitters
+              ps.unstructured
+              ps.jq
               # Our custom packages
               langchain-experimental
               langchain-qdrant
