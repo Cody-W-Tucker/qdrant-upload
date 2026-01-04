@@ -45,7 +45,7 @@
           };
 
           # Build langchain-experimental compatible with nixpkgs versions
-          langchain-experimental = pkgs.python313Packages.buildPythonPackage rec {
+          langchain-experimental = pkgs.python312Packages.buildPythonPackage rec {
             pname = "langchain_experimental";
             version = "0.3.1"; # Using an older version compatible with langchain 0.3.20
             format = "pyproject";
@@ -53,24 +53,24 @@
               inherit pname version;
               sha256 = "b4moidS+K/ZQdr2NYbPTbpSFXSDxjqXAZk4AcA8q/Vg=";
             };
-            nativeBuildInputs = [ pkgs.python313Packages.poetry-core ];
-            propagatedBuildInputs = with pkgs.python313Packages; [
+            nativeBuildInputs = [ pkgs.python312Packages.poetry-core ];
+            propagatedBuildInputs = with pkgs.python312Packages; [
               langchain
               langchain-community
             ];
           };
 
           # Build langchain-qdrant
-          langchain-qdrant = pkgs.python313Packages.buildPythonPackage rec {
+          langchain-qdrant = pkgs.python312Packages.buildPythonPackage rec {
             pname = "langchain_qdrant";
-            version = "1.1.0"; # Use latest version or adjust as needed
+            version = "0.2.1"; # Compatible with langchain-core 0.3.x
             format = "pyproject";
             src = pkgs.fetchPypi {
               inherit pname version;
-              sha256 = "433236845736f973543ac6b7137f9d7fa511b7539373fbc6565c581d3ba59373";
+              sha256 = "0z1bdbd7ygi37wvlynk9jx95kjssdg5dqvxyycr7rs05wgiwrn0r";
             };
-            nativeBuildInputs = [ pkgs.python313Packages.poetry-core ];
-            propagatedBuildInputs = with pkgs.python313Packages; [
+            nativeBuildInputs = [ pkgs.python312Packages.pdm-backend ];
+            propagatedBuildInputs = with pkgs.python312Packages; [
               langchain
               qdrant-client
             ];
@@ -93,7 +93,7 @@
               maxConcurrent ? defaultOptions.maxConcurrent,
               asyncChat ? defaultOptions.asyncChat,
             }:
-            (pkgs.python313.withPackages (
+            (pkgs.python312.withPackages (
               ps: with ps; [
                 python-dotenv
                 qdrant-client
