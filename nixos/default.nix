@@ -6,24 +6,17 @@
 }:
 
 let
-  # Use python312 for langchain-experimental
-  python312 = stdenv.mkDerivation {
-    name = "python312-wrapper";
-    buildInputs = [ python3 ];
-    python312Packages = import <nixpkgs> { inherit stdenv; }.python312Packages;
-  };
-
-  # Use langchain-experimental from python312Packages
-  langchain-experimental = (import <nixpkgs> { inherit stdenv; }).python312Packages.langchain-experimental;
+  # Use langchain-experimental from nixpkgs
+  langchain-experimental = python3.pkgs.langchain-experimental;
 
   # Build langchain-qdrant
   langchain-qdrant = python3.pkgs.buildPythonPackage rec {
     pname = "langchain_qdrant";
-    version = "1.1.0"; # Use latest version or adjust as needed
+    version = "1.1.0"; # Use latest version
     format = "pyproject";
     src = python3.pkgs.fetchPypi {
       inherit pname version;
-      sha256 = "QzI2hFc2+XNUOsa3E3+df6URt1OTc/vGVlxYHTulk3M=";
+      sha256 = "0wwkllxisn2wav3gnwwkafvi39bzkmzi7dy679a77y9nay23ccj3";
     };
     nativeBuildInputs = [ python3.pkgs.hatchling ];
     propagatedBuildInputs = with python3.pkgs; [
