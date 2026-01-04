@@ -1,7 +1,7 @@
 {
   description = "A Nix-flake-based Python document uploader for Qdrant";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
 
   outputs =
     { self, nixpkgs }:
@@ -50,13 +50,13 @@
           # Build langchain-qdrant
           langchain-qdrant = pythonWithOverrides.pkgs.buildPythonPackage rec {
             pname = "langchain_qdrant";
-            version = "0.2.1"; # Use version compatible with nixos-24.11 packages
+            version = "1.1.0"; # Use version compatible with nixos-25.11 packages
             format = "pyproject";
             src = pythonWithOverrides.pkgs.fetchPypi {
               inherit pname version;
-              sha256 = "QzI2hFc2+XNUOsa3E3+df6URt1OTc/vGVlxYHTulk3M=";
+              sha256 = "0wwkllxisn2wav3gnwwkafvi39bzkmzi7dy679a77y9nay23ccj3";
             };
-            nativeBuildInputs = [ pythonWithOverrides.pkgs.pdm-backend ];
+            nativeBuildInputs = [ pythonWithOverrides.pkgs.hatchling ];
             propagatedBuildInputs = with pythonWithOverrides.pkgs; [
               langchain
               qdrant-client
