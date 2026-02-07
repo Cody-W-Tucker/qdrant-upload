@@ -5,6 +5,7 @@ import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from langchain_community.document_loaders import DirectoryLoader, ObsidianLoader, JSONLoader
+from langchain_community.document_loaders import PyPDFLoader, UnstructuredEPubLoader, UnstructuredFileLoader
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from langchain_experimental.text_splitter import SemanticChunker
@@ -62,8 +63,8 @@ parser.add_argument('--collection', type=str, default=DEFAULT_COLLECTION,
                    help=f'Name of the Qdrant collection to use (defaults to "{DEFAULT_COLLECTION}")')
 parser.add_argument('--source', type=str, 
                    help='Custom source identifier for all documents (overrides default source paths)')
-parser.add_argument('--type', type=str, required=True, choices=['general', 'obsidian', 'chat'],
-                   help='Type of documents to process: general, obsidian, or chat')
+parser.add_argument('--type', type=str, required=True, choices=['general', 'obsidian', 'chat', 'ebook'],
+                    help='Type of documents to process: general, obsidian, or chat')
 parser.add_argument('--dirs', type=str, nargs='+',
                    help='Directories to process (for general and obsidian types)')
 parser.add_argument('--json-file', type=str, 
@@ -581,6 +582,91 @@ def collect_obsidian_documents(directories, custom_source=None):
             
     return documents
 
+# Function to load E-book documents (PDF, EPUB, MOBI, etc.) with incremental update logic
+def collect_ebook_documents(directories, custom_source=None):
+    from langchain_core.documents import Document
+    documents = []
+    supported_exts = {
+        '.pdf': 'pdf',
+        '.epub': 'epub',
+        '.mobi': 'mobi',
+        '.azw': 'mobi',
+        '.azw3': 'mobi',
+    }
+
+    for directory_path in directories:
+        if not os.path.exists(directory_path):
+            logger.warning(f"Warning: Directory '{directory_path}' does not exist. Skipping.")
+            continue
+
+        for root, _, files in os.walk(directory_path):
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in supported_exts:
+                    continue
+
+                file_path = os.path.join(root, fname)
+                try:
+                    book_title = None
+                    book_author = None
+
+                    if ext == '.pdf':
+                        try:
+                            from PyPDF2 import PdfReader
+                            reader = PdfReader(file_path)
+                            meta = reader.metadata or {}
+                            book_title = meta.get('/Title')
+                            book_author = meta.get('/Author')
+                        except Exception:
+                            pass
+                        loader = PyPDFLoader(file_path)
+                    elif ext == '.epub':
+                        try:
+                            from ebooklib import epub
+                            book = epub.read_epub(file_path)
+                            titles = book.get_metadata('DC', 'title')
+                            creators = book.get_metadata('DC', 'creator')
+                            if titles:
+                                book_title = titles[0][0]
+                            if creators:
+                                book_author = creators[0][0]
+                        except Exception:
+                            pass
+                        loader = UnstructuredEPubLoader(file_path)
+                    else:
+                        loader = UnstructuredFileLoader(file_path)
+
+                    loaded_docs = loader.load()
+                    if not loaded_docs:
+                        continue
+
+                    try:
+                        last_modified = os.path.getmtime(file_path)
+                    except Exception:
+                        last_modified = time.time()
+
+                    source_value = custom_source if custom_source else os.path.abspath(file_path)
+
+                    for doc in loaded_docs:
+                        if not doc.metadata:
+                            doc.metadata = {}
+                        doc.metadata['source'] = source_value
+                        doc.metadata['original_file_path'] = os.path.abspath(file_path)
+                        doc.metadata['last_modified'] = last_modified
+                        doc.metadata['book_format'] = supported_exts.get(ext, 'unknown')
+                        if book_title:
+                            doc.metadata['book_title'] = book_title
+                        if book_author:
+                            doc.metadata['book_author'] = book_author
+                        documents.append(doc)
+
+                    logger.info(f"Loaded ebook: {file_path} ({len(loaded_docs)} sections)")
+
+                except Exception as e:
+                    logger.warning(f"Failed to load ebook {file_path}: {e}")
+
+    return documents
+
 # Function to filter out empty or very short documents
 def filter_documents(docs, min_word_count=MIN_CONTENT_LENGTH):
     filtered_docs = []
@@ -709,7 +795,7 @@ vector_store = QdrantVectorStore(
 
 # Validate required arguments
 directories_to_process = args.dirs or []
-if args.type in ['general', 'obsidian'] and not directories_to_process:
+if args.type in ['general', 'obsidian', 'ebook'] and not directories_to_process:
     logger.error(f"Error: No directories specified for {args.type} document type. Use --dirs to specify directories.")
     exit(1)
 
@@ -930,6 +1016,119 @@ elif args.type == 'obsidian':
     logger.info(f"  - Document sources skipped (unchanged or already exists): {total_skipped_sources}")
     logger.info(f"  - Total chunks uploaded: {total_chunks_uploaded}")
     logger.info(f"Successfully processed Obsidian documents to Qdrant collection '{args.collection}' at {QDRANT_URL}.")
+
+elif args.type == 'ebook':
+    logger.info(f"Processing E-book documents with update checks from: {directories_to_process}")
+
+    raw_docs = collect_ebook_documents(directories_to_process, args.source)
+    raw_docs = filter_documents(raw_docs)
+
+    if not raw_docs:
+        logger.info("No E-book documents found to process. Exiting.")
+        exit(0)
+
+    docs_by_source = {}
+    for doc in raw_docs:
+        src = doc.metadata.get('source')
+        docs_by_source.setdefault(src, []).append(doc)
+
+    # Cull remote ebook sources no longer present locally
+    local_sources = set(docs_by_source.keys())
+    remote_sources = set()
+    offset = None
+    while True:
+        records, offset = client.scroll(
+            collection_name=collection_name,
+            limit=BATCH_SIZE,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for rec in records:
+            payload = getattr(rec, 'payload', None) or rec.get('payload')
+            if not payload:
+                continue
+            meta = payload.get('metadata', {}) or {}
+            src = meta.get('source')
+            if src:
+                remote_sources.add(src)
+        if offset is None:
+            break
+
+    to_delete = remote_sources - local_sources
+    for src in to_delete:
+        client.delete(
+            collection_name=collection_name,
+            points_selector=Filter(
+                must=[FieldCondition(key="metadata.source", match=MatchValue(value=src))]
+            )
+        )
+        logger.info(f"Deleted remote ebook source no longer present: {src}")
+
+    docs_to_upload = []
+    skipped = 0
+    updated = 0
+    added = 0
+
+    for src, src_docs in docs_by_source.items():
+        needs_processing = True
+        existing_doc_found = False
+
+        if args.skip_existing:
+            res = client.scroll(
+                collection_name=args.collection,
+                scroll_filter=Filter(must=[FieldCondition(key="metadata.source", match=MatchValue(value=src))]),
+                limit=1,
+                with_payload=False,
+                with_vectors=False,
+            )
+            if res[0]:
+                skipped += 1
+                needs_processing = False
+
+        elif not args.force_update:
+            res = client.scroll(
+                collection_name=args.collection,
+                scroll_filter=Filter(must=[FieldCondition(key="metadata.source", match=MatchValue(value=src))]),
+                limit=1,
+                with_payload=True,
+                with_vectors=False,
+            )
+            if res[0]:
+                existing_doc_found = True
+                local_last_modified = src_docs[0].metadata.get('last_modified', 0)
+                stored_meta = res[0][0].payload.get('metadata', {})
+                stored_last_modified = stored_meta.get('last_modified', 0)
+                if local_last_modified <= stored_last_modified:
+                    skipped += 1
+                    needs_processing = False
+
+        if needs_processing:
+            client.delete(
+                collection_name=args.collection,
+                points_selector=Filter(must=[FieldCondition(key="metadata.source", match=MatchValue(value=src))])
+            )
+            docs_to_upload.extend(src_docs)
+            if existing_doc_found:
+                updated += 1
+            else:
+                added += 1
+
+    if docs_to_upload:
+        logger.info(f"Splitting and uploading {len(docs_to_upload)} ebook sections...")
+        split_docs = split_documents_intelligently(docs_to_upload, "ebook")
+        for i, chunk in enumerate(split_docs):
+            if not chunk.metadata:
+                chunk.metadata = {}
+            chunk.metadata['chunk_id'] = f"{chunk.metadata.get('source')}_ebook_part_{i}"
+
+        for i in range(0, len(split_docs), BATCH_SIZE):
+            vector_store.add_documents(split_docs[i:i+BATCH_SIZE])
+
+    logger.info(f"\nE-book processing complete:")
+    logger.info(f"  - New books added: {added}")
+    logger.info(f"  - Books updated: {updated}")
+    logger.info(f"  - Books skipped: {skipped}")
 
 elif args.type == 'chat':
     if ENABLE_ASYNC_CHAT:

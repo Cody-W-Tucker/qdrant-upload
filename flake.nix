@@ -64,40 +64,44 @@
           };
 
           # Use python312 for consistency with nixos-24.11
-          pythonWithOverrides = pkgs.python312;
+           pythonWithOverrides = pkgs.python312;
 
-          # Function to create a Python environment with specific package versions and config
-          mkPythonEnv =
-          {
-            qdrantUrl ? defaultOptions.qdrantUrl,
-            defaultCollection ? defaultOptions.defaultCollection,
-            embeddingModel ? defaultOptions.embeddingModel,
-            vectorDimensions ? defaultOptions.vectorDimensions,
-            distanceMetric ? defaultOptions.distanceMetric,
-            batchSize ? defaultOptions.batchSize,
-            minContentLength ? defaultOptions.minContentLength,
-            obsidianDirectories ? defaultOptions.obsidianDirectories,
-            chunkSize ? defaultOptions.chunkSize,
-            chunkOverlap ? defaultOptions.chunkOverlap,
-            semanticChunker ? defaultOptions.semanticChunker,
-            maxConcurrent ? defaultOptions.maxConcurrent,
-            asyncChat ? defaultOptions.asyncChat,
-          }:
-          (pythonWithOverrides.withPackages (
-            ps: [
-              ps.python-dotenv
-              ps.qdrant-client
-              # Use packages from nixpkgs
-              ps.langchain
-              ps.langchain-community
-              ps.langchain-text-splitters
-              ps.unstructured
-              ps.jq
-              # Our custom packages
-              langchain-experimental
-              langchain-qdrant
-            ]
-          )).overrideAttrs
+           # Function to create a Python environment with specific package versions and config
+           mkPythonEnv =
+           {
+             qdrantUrl ? defaultOptions.qdrantUrl,
+             defaultCollection ? defaultOptions.defaultCollection,
+             embeddingModel ? defaultOptions.embeddingModel,
+             vectorDimensions ? defaultOptions.vectorDimensions,
+             distanceMetric ? defaultOptions.distanceMetric,
+             batchSize ? defaultOptions.batchSize,
+             minContentLength ? defaultOptions.minContentLength,
+             obsidianDirectories ? defaultOptions.obsidianDirectories,
+             chunkSize ? defaultOptions.chunkSize,
+             chunkOverlap ? defaultOptions.chunkOverlap,
+             semanticChunker ? defaultOptions.semanticChunker,
+             maxConcurrent ? defaultOptions.maxConcurrent,
+             asyncChat ? defaultOptions.asyncChat,
+           }:
+           (pythonWithOverrides.withPackages (
+             ps: [
+               ps.python-dotenv
+               ps.qdrant-client
+               # Use packages from nixpkgs
+               ps.langchain
+               ps.langchain-community
+               ps.langchain-text-splitters
+               ps.unstructured
+               ps.jq
+               # Additional packages for ebook processing
+               ps.pypandoc
+               ps.pypdf2
+               ps.ebooklib
+               # Our custom packages
+               langchain-experimental
+               langchain-qdrant
+             ]
+           )).overrideAttrs
               (old: {
                 passthru = {
                   inherit

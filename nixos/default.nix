@@ -33,6 +33,10 @@ let
     langchain-community
     langchain-text-splitters
     unstructured
+    # Additional packages for ebook processing
+    pypandoc
+    pypdf2
+    ebooklib
     # Add our custom packages
     langchain-experimental
     langchain-qdrant
@@ -104,6 +108,7 @@ stdenv.mkDerivation {
       echo "  obsidian - Process Obsidian documents"
       echo "  general  - Process general documents"
       echo "  chat     - Process chat history from JSON file"
+      echo "  ebook    - Process ebook documents (PDF, EPUB, etc.)"
       echo ""
       echo "Example: qdrant-upload obsidian --collection my_docs"
       exit 1

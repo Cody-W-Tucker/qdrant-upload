@@ -52,6 +52,14 @@
         jsonFile = "/home/user/Downloads/open-webui-export.json";
         schedule = "*-*-* 04:00:00"; # Custom schedule: Daily at 4 AM
       }
+
+      # E-book collection
+      {
+        name = "ebooks";
+        type = "ebook";
+        collection = "books";
+        directories = [ "/home/user/Documents/Books" ];
+      }
     ];
   };
 }

@@ -13,10 +13,10 @@ let
         description = "Unique name for this source configuration";
       };
 
-      type = mkOption {
-        type = types.enum [ "general" "obsidian" "chat" ];
-        description = "Type of documents to process";
-      };
+       type = mkOption {
+         type = types.enum [ "general" "obsidian" "chat" "ebook" ];
+         description = "Type of documents to process";
+       };
 
       collection = mkOption {
         type = types.str;
